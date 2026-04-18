@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
 
     // =================== STEP 2: BUILD CONTEXT ===================
     const context = hits
-      .map((hit, i) => `[Document: ${hit.filename}]\n${hit.text}`)
+      .map((hit) => `[Document: ${hit.filename}]\n${hit.text}`)
       .join('\n\n---\n\n');
 
     // Collect unique source filenames

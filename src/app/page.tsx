@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 
 interface Document {
   filename: string;
@@ -32,6 +32,22 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Documents tab state
+  const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
+  const [docSearch, setDocSearch] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Filtered documents based on search
+  const filteredDocs = useMemo(() => {
+    if (!docSearch.trim()) return documents;
+    const query = docSearch.toLowerCase().trim();
+    return documents.filter(
+      (doc) =>
+        doc.filename.toLowerCase().includes(query) ||
+        doc.sha256.toLowerCase().includes(query)
+    );
+  }, [documents, docSearch]);
+
   // Fetch documents on mount and after upload/delete
   const fetchDocuments = async () => {
     try {
@@ -53,6 +69,101 @@ export default function Home() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
+  // Clear selection when switching tabs or documents change
+  useEffect(() => {
+    setSelectedDocs(new Set());
+    setDocSearch('');
+  }, [activeTab]);
+
+  // Toggle a single document checkbox
+  const toggleDoc = (filename: string) => {
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(filename)) {
+        next.delete(filename);
+      } else {
+        next.add(filename);
+      }
+      return next;
+    });
+  };
+
+  // Select/deselect all filtered (visible) documents
+  const toggleAllFiltered = () => {
+    const filteredFilenames = filteredDocs.map((d) => d.filename);
+    const allFilteredSelected = filteredFilenames.every((f) => selectedDocs.has(f));
+
+    if (allFilteredSelected) {
+      // Deselect only the filtered ones
+      setSelectedDocs((prev) => {
+        const next = new Set(prev);
+        filteredFilenames.forEach((f) => next.delete(f));
+        return next;
+      });
+    } else {
+      // Select all filtered ones
+      setSelectedDocs((prev) => {
+        const next = new Set(prev);
+        filteredFilenames.forEach((f) => next.add(f));
+        return next;
+      });
+    }
+  };
+
+  // Select all matching search results
+  const selectSearchMatches = () => {
+    const matchedFilenames = filteredDocs.map((d) => d.filename);
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      matchedFilenames.forEach((f) => next.add(f));
+      return next;
+    });
+  };
+
+  // Bulk delete selected documents
+  const handleBulkDelete = async (filenames: string[]) => {
+    if (filenames.length === 0) return;
+    const label = filenames.length === 1 ? `"${filenames[0]}"` : `${filenames.length} documents`;
+    if (!confirm(`Delete ${label}?`)) return;
+
+    setIsDeleting(true);
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const filename of filenames) {
+      try {
+        const formData = new FormData();
+        formData.append('name', filename);
+        formData.append('mode', 'Delete');
+
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await res.json();
+        if (data.status === 'Deleted') {
+          successCount++;
+        } else {
+          failCount++;
+          console.error(`Failed to delete ${filename}:`, data.error || data.status);
+        }
+      } catch (err) {
+        failCount++;
+        console.error(`Failed to delete ${filename}:`, err);
+      }
+    }
+
+    // Clear selection and refresh
+    setSelectedDocs(new Set());
+    await fetchDocuments();
+    setIsDeleting(false);
+
+    if (failCount > 0) {
+      alert(`Deleted ${successCount} document(s). ${failCount} failed.`);
+    }
+  };
+
   // Handle file upload
   const handleUpload = async () => {
     setIsLoading(true);
@@ -62,7 +173,6 @@ export default function Home() {
       const formData = new FormData();
 
       if (uploadMode === 'Delete') {
-        // For delete, we just need the filename
         const filename = selectedFile?.name || prompt('Enter filename to delete:');
         if (!filename) {
           setUploadStatus('Error: Filename is required for delete');
@@ -155,11 +265,11 @@ export default function Home() {
     setIsLoading(false);
   };
 
-  // Handle delete from documents list
+  // Handle single delete from documents list
   const handleDeleteDocument = async (filename: string) => {
     if (!confirm(`Delete "${filename}"?`)) return;
 
-    setIsLoading(true);
+    setIsDeleting(true);
     try {
       const formData = new FormData();
       formData.append('name', filename);
@@ -173,14 +283,21 @@ export default function Home() {
       const data = await res.json();
       if (data.status === 'Deleted') {
         fetchDocuments();
+        setSelectedDocs((prev) => {
+          const next = new Set(prev);
+          next.delete(filename);
+          return next;
+        });
       } else {
         alert(`Delete failed: ${data.error || data.status || 'Unknown error'}`);
       }
     } catch (err: any) {
       alert(`Delete failed: ${err.message}`);
     }
-    setIsLoading(false);
+    setIsDeleting(false);
   };
+
+  const allFilteredSelected = filteredDocs.length > 0 && filteredDocs.every((d) => selectedDocs.has(d.filename));
 
   return (
     <div className="min-h-screen bg-[var(--background)]">
@@ -324,7 +441,7 @@ export default function Home() {
             {uploadMode === 'Delete' && (
               <div className="mb-4">
                 <p className="text-sm text-[var(--muted)]">
-                  Select a file to delete from the Documents tab, or use the list below.
+                  Select files to delete from the Documents tab.
                 </p>
               </div>
             )}
@@ -445,27 +562,142 @@ export default function Home() {
         {/* Documents Tab */}
         {activeTab === 'docs' && (
           <div className="bg-[var(--card-bg)] border border-[var(--card-border)] rounded-xl">
-            <div className="p-4 border-b border-[var(--card-border)] flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-white">Indexed Documents</h2>
-              <button
-                onClick={fetchDocuments}
-                className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
-              >
-                Refresh
-              </button>
+            {/* Header with search and actions */}
+            <div className="p-4 border-b border-[var(--card-border)]">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-white">Indexed Documents</h2>
+                <div className="flex items-center gap-2">
+                  {selectedDocs.size > 0 && (
+                    <button
+                      onClick={() => handleBulkDelete(Array.from(selectedDocs))}
+                      disabled={isDeleting}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-50"
+                    >
+                      {isDeleting
+                        ? 'Deleting...'
+                        : `Delete Selected (${selectedDocs.size})`}
+                    </button>
+                  )}
+                  <button
+                    onClick={fetchDocuments}
+                    className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+
+              {/* Search bar */}
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <svg
+                    className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted)]"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                    />
+                  </svg>
+                  <input
+                    type="text"
+                    value={docSearch}
+                    onChange={(e) => setDocSearch(e.target.value)}
+                    placeholder="Search by filename or SHA256..."
+                    className="w-full bg-[var(--background)] border border-[var(--card-border)] rounded-lg pl-10 pr-4 py-2.5 text-white text-sm focus:outline-none focus:border-blue-500"
+                  />
+                  {docSearch && (
+                    <button
+                      onClick={() => setDocSearch('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-white transition-colors"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                {docSearch.trim() && filteredDocs.length > 0 && (
+                  <button
+                    onClick={selectSearchMatches}
+                    className="px-3 py-2 rounded-lg text-xs font-medium bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 transition-colors whitespace-nowrap"
+                  >
+                    Select {filteredDocs.length} match{filteredDocs.length !== 1 ? 'es' : ''}
+                  </button>
+                )}
+                {docSearch.trim() && filteredDocs.length > 0 && (
+                  <button
+                    onClick={() => handleBulkDelete(filteredDocs.map((d) => d.filename))}
+                    disabled={isDeleting}
+                    className="px-3 py-2 rounded-lg text-xs font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 transition-colors whitespace-nowrap disabled:opacity-50"
+                  >
+                    {isDeleting ? 'Deleting...' : 'Delete Matches'}
+                  </button>
+                )}
+              </div>
+
+              {/* Selection info */}
+              {selectedDocs.size > 0 && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-[var(--muted)]">
+                  <span>{selectedDocs.size} selected</span>
+                  <button
+                    onClick={() => setSelectedDocs(new Set())}
+                    className="text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    Clear selection
+                  </button>
+                </div>
+              )}
             </div>
+
             {documents.length === 0 ? (
               <div className="p-8 text-center text-[var(--muted)]">
                 <p className="text-3xl mb-3">No documents yet</p>
                 <p className="text-sm">Upload a document to get started</p>
               </div>
+            ) : filteredDocs.length === 0 ? (
+              <div className="p-8 text-center text-[var(--muted)]">
+                <p className="text-lg mb-2">No matches found</p>
+                <p className="text-sm">Try a different search term</p>
+              </div>
             ) : (
               <div className="divide-y divide-[var(--card-border)]">
-                {documents.map((doc) => (
+                {/* Select All row */}
+                <div className="px-4 py-2 flex items-center gap-3 bg-[var(--card-border)]/20">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleAllFiltered}
+                    className="w-4 h-4 rounded border-[var(--card-border)] bg-[var(--background)] text-blue-600 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer accent-blue-600"
+                  />
+                  <span className="text-xs text-[var(--muted)]">
+                    {allFilteredSelected ? 'Deselect all' : 'Select all'}
+                    {docSearch.trim() ? ` (${filteredDocs.length} shown)` : ` (${documents.length})`}
+                  </span>
+                </div>
+
+                {filteredDocs.map((doc) => (
                   <div
                     key={doc.filename}
-                    className="p-4 flex items-center justify-between hover:bg-[var(--card-border)]/30 transition-colors"
+                    className={`p-4 flex items-center gap-3 transition-colors ${
+                      selectedDocs.has(doc.filename)
+                        ? 'bg-blue-600/10'
+                        : 'hover:bg-[var(--card-border)]/30'
+                    }`}
                   >
+                    {/* Checkbox */}
+                    <input
+                      type="checkbox"
+                      checked={selectedDocs.has(doc.filename)}
+                      onChange={() => toggleDoc(doc.filename)}
+                      className="w-4 h-4 rounded border-[var(--card-border)] bg-[var(--background)] text-blue-600 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer accent-blue-600 flex-shrink-0"
+                    />
+
+                    {/* Document info */}
                     <div className="flex-1 min-w-0">
                       <p className="text-white font-medium truncate">{doc.filename}</p>
                       <div className="flex items-center gap-3 mt-1 text-xs text-[var(--muted)]">
@@ -474,14 +706,26 @@ export default function Home() {
                         <span>Updated: {new Date(doc.updated_at).toLocaleString()}</span>
                       </div>
                     </div>
+
+                    {/* Individual delete button */}
                     <button
                       onClick={() => handleDeleteDocument(doc.filename)}
-                      className="ml-4 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 transition-colors"
+                      disabled={isDeleting}
+                      className="ml-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 transition-colors disabled:opacity-50 flex-shrink-0"
                     >
                       Delete
                     </button>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Footer with count */}
+            {documents.length > 0 && (
+              <div className="px-4 py-3 border-t border-[var(--card-border)] text-xs text-[var(--muted)]">
+                {docSearch.trim()
+                  ? `Showing ${filteredDocs.length} of ${documents.length} documents`
+                  : `${documents.length} document${documents.length !== 1 ? 's' : ''} total`}
               </div>
             )}
           </div>
