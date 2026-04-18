@@ -32,7 +32,11 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      if (file) {
+      if (mode === 'Delete') {
+        // Delete mode — only need name, no file or content required
+        type = 'text'; // placeholder, won't be used
+        content = '';  // placeholder, won't be used
+      } else if (file) {
         // File upload — determine type from extension
         const ext = name.toLowerCase().split('.').pop() || '';
         if (ext === 'pdf') {
@@ -67,9 +71,17 @@ export async function POST(request: NextRequest) {
       name = body.name;
       mode = body.mode;
 
-      if (!type || !content || !name || !mode) {
+      if (!name || !mode) {
         return NextResponse.json(
-          { status: 'Error', error: 'Missing required fields: type, content, name, mode' },
+          { status: 'Error', error: 'Missing required fields: name, mode' },
+          { status: 400 }
+        );
+      }
+
+      // type and content are only required for Add/Replace modes (not Delete)
+      if (mode !== 'Delete' && (!type || !content)) {
+        return NextResponse.json(
+          { status: 'Error', error: 'Missing required fields for Add/Replace: type, content' },
           { status: 400 }
         );
       }

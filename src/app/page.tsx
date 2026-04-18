@@ -173,9 +173,11 @@ export default function Home() {
       const data = await res.json();
       if (data.status === 'Deleted') {
         fetchDocuments();
+      } else {
+        alert(`Delete failed: ${data.error || data.status || 'Unknown error'}`);
       }
-    } catch (err) {
-      console.error('Delete failed:', err);
+    } catch (err: any) {
+      alert(`Delete failed: ${err.message}`);
     }
     setIsLoading(false);
   };
