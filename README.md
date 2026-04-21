@@ -20,6 +20,21 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/ingest" \
   }'
 ```
 
+**PowerShell example:**
+```powershell
+$body = @{
+    content = "Your content here"
+    filename = "filename.txt"
+    metadata = @{
+        doc_type = "token"
+        project = "gem"
+        version = "1.0"
+    }
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/ingest" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+```
+
 ---
 
 ## 2. Upload PDF File (FormData, must be <4.5MB)
@@ -38,8 +53,8 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 **Example with Windows path:**
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
-  -F "file=@D:\test\pdf-sample_0.pdf" \
-  -F "name=pdf-sample_0.pdf" \
+  -F "file=@D:\test\Values Description PDF.pdf" \
+  -F "name=Values Description PDF.pdf" \
   -F "mode=Add"
 ```
 
@@ -47,6 +62,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 ## 3. Upload via JSON (base64-encoded PDF or text)
 
+For PDF (programmatic use - requires base64 encoding):
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
@@ -58,7 +74,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   }'
 ```
 
-Or for text content:
+For text content:
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
@@ -68,6 +84,18 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
     "name": "document.txt",
     "mode": "Add"
   }'
+```
+
+**PowerShell example for text upload:**
+```powershell
+$body = @{
+    type = "text"
+    content = "Your raw text content here"
+    name = "document.txt"
+    mode = "Add"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 ```
 
 ---
@@ -101,6 +129,15 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
   }'
 ```
 
+**PowerShell example:**
+```powershell
+$body = @{
+    query = "What is the total supply of GEM tokens?"
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+```
+
 ---
 
 ## 5. List Documents
@@ -122,7 +159,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 Example:
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
-  -F "name=pdf-sample_0.pdf" \
+  -F "name=Values Description PDF.pdf" \
   -F "mode=Delete"
 ```
 
