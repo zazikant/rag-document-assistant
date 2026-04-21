@@ -69,6 +69,15 @@ export async function POST(request: NextRequest) {
     // Filter hits to only include those from valid documents (for LLM context)
     const validHits = hits.filter((h) => validFilenames.has(h.filename));
 
+    // CRITICAL: If top valid hit has low relevance, don't let LLM hallucinate
+    const topScore = validHits.length > 0 ? validHits[0].score : 0;
+    if (topScore < 0.55) {
+      return NextResponse.json({
+        answer: "I don't know. The available documents do not contain relevant information to answer this question.",
+        sources: [],
+      });
+    }
+
     const context = validHits
       .map((hit) => `[Document: ${hit.filename}]\n${hit.text}`)
       .join('\n\n---\n\n');
