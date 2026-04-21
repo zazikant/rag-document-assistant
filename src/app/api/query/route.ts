@@ -6,20 +6,26 @@ export const maxDuration = 120; // 2 min to accommodate up to 3 retries × 15s w
 
 interface QueryRequest {
   query: string;
+  top_k?: number;
+  filters?: {
+    doc_type?: string;
+    project?: string;
+  };
 }
 
-const SYSTEM_PROMPT = `You are a helpful assistant that answers questions based on the provided document context.
-Follow these rules:
-1. Answer based ONLY on the provided context. Do not use external knowledge.
-2. If the context does not contain enough information to answer the question, say "I don't have enough information in the provided documents to answer this question."
-3. Always cite which document(s) your answer comes from.
-4. Be concise but thorough in your answers.
-5. If multiple documents provide relevant information, synthesize the information from all of them.`;
+const SYSTEM_PROMPT = `You are an intelligent document assistant.
+Rules:
+1. Never say not enough information if partial reasoning is possible.
+2. CEO = MD = Chief Executive Officer = Head; CFO = Finance Head, COO = Operations Head
+3. If documents conflict show both values and cite each source.
+4. For SQL always prefer schema document over sample data when they conflict.
+5. Always cite source for every fact.`;
 
 export async function POST(request: NextRequest) {
   try {
     const body: QueryRequest = await request.json();
-    const { query } = body;
+    const { query, top_k, filters } = body;
+
 
     if (!query || query.trim().length === 0) {
       return NextResponse.json(
@@ -31,7 +37,7 @@ export async function POST(request: NextRequest) {
     // =================== STEP 1: SEARCH PINECONE ===================
     let hits: Array<{ text: string; filename: string; score: number }>;
     try {
-      hits = await searchRecords(query, 4);
+      hits = await searchRecords(query, top_k || 8, 0.70, filters);
     } catch (error: any) {
       console.error('Pinecone search error:', error);
       return NextResponse.json(
@@ -54,6 +60,7 @@ export async function POST(request: NextRequest) {
 
     // Collect unique source filenames
     const sources = [...new Set(hits.map((h) => h.filename))];
+
 
     // =================== STEP 3: CALL NVIDIA LLM (with built-in retry) ===================
     const messages = [

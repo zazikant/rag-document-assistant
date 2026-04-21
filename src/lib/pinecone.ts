@@ -17,8 +17,10 @@ export const EMBEDDING_DIMENSION = 1024;
 function chunkText(text: string, chunkSize: number = 500, overlap: number = 50): string[] {
   if (!text || text.length === 0) return [];
 
+
   const chunks: string[] = [];
   let start = 0;
+
 
   while (start < text.length) {
     const end = start + chunkSize;
@@ -32,34 +34,40 @@ function chunkText(text: string, chunkSize: number = 500, overlap: number = 50):
   return chunks;
 }
 
+export interface ChunkMetadata {
+  filename: string;
+  doc_type?: string;
+  project?: string;
+  version?: string;
+  uploaded_at?: number;
+}
+
 /**
  * Upsert document chunks into Pinecone using multilingual-e5-large.
  * - Deletes previous chunks for the same filename
  * - Embeds with correct input_type="passage"
- * - Upserts with metadata (filename, text, chunk_index, total_chunks)
+ * - Upserts with full metadata (filename, text, chunk_index, total_chunks, doc_type, project, version, uploaded_at)
  */
 export async function upsertRecords(
   text: string,
   filename: string,
-  chunkSize: number = 500
+  metadata?: ChunkMetadata
 ): Promise<{ status: string; filename: string; chunks: number }> {
   if (!text || !filename) {
     throw new Error('text and filename are required');
   }
 
-  // 1. Delete existing records for this filename
-  await pineconeIndex.deleteMany({
-    filter: { filename: { $eq: filename } },
-  });
-
-  // 2. Chunk the text
+  const chunkSize = 500;
   const chunks = chunkText(text, chunkSize);
 
   if (chunks.length === 0) {
     return { status: 'error', filename, chunks: 0 };
   }
 
-  // 3. Embed all chunks in one call (efficient) — input_type="passage" for documents
+  await pineconeIndex.deleteMany({
+    filter: { filename: { $eq: filename } },
+  });
+
   const embeddingsResponse = await pinecone.inference.embed({
     model: EMBEDDING_MODEL,
     inputs: chunks,
@@ -69,7 +77,6 @@ export async function upsertRecords(
     },
   });
 
-  // 4. Prepare vectors for upsert
   const vectors = embeddingsResponse.data.map((emb: any, i: number) => ({
     id: `${filename}_${i}_${uuidv4().slice(0, 8)}`,
     values: emb.values as number[],
@@ -78,6 +85,10 @@ export async function upsertRecords(
       text: chunks[i],
       chunk_index: i,
       total_chunks: chunks.length,
+      doc_type: metadata?.doc_type || 'unknown',
+      project: metadata?.project || 'default',
+      version: metadata?.version || '1.0',
+      uploaded_at: metadata?.uploaded_at || Date.now(),
     },
   }));
 
@@ -109,9 +120,17 @@ export async function deleteRecords(filename: string): Promise<void> {
  */
 export async function searchRecords(
   query: string,
-  topK: number = 4
+  topK: number = 8,
+  minScore: number = 0.70,
+  filter?: { doc_type?: string; project?: string },
+  forceAggregation?: boolean
 ): Promise<Array<{ text: string; filename: string; score: number }>> {
-  // Embed the query — input_type="query" for search
+  const aggregationKeywords = ['all', 'every', 'list', 'how many', 'compare', 'show me', 'find all', 'get all', 'total', 'count'];
+  const isAggregation = forceAggregation || aggregationKeywords.some(kw => query.toLowerCase().includes(kw));
+  const effectiveTopK = isAggregation ? 50 : topK;
+  const effectiveMinScore = isAggregation ? 0.50 : minScore;
+
+
   const queryEmbedding = await pinecone.inference.embed({
     model: EMBEDDING_MODEL,
     inputs: [query],
@@ -123,18 +142,29 @@ export async function searchRecords(
 
   const queryVector = (queryEmbedding.data as any[])[0].values as number[];
 
-  // Search Pinecone
-  const searchResponse = await pineconeIndex.query({
-    vector: queryVector,
-    topK,
-    includeMetadata: true,
-  });
 
-  return (searchResponse.matches || []).map((match: any) => ({
-    text: match.metadata?.text || '',
-    filename: match.metadata?.filename || '',
-    score: match.score || 0,
-  }));
+  const queryOptions: any = {
+    vector: queryVector,
+    topK: effectiveTopK,
+    includeMetadata: true,
+  };
+
+  if (filter && (filter.doc_type || filter.project)) {
+    const metadataFilter: any = {};
+    if (filter.doc_type) metadataFilter.doc_type = { $eq: filter.doc_type };
+    if (filter.project) metadataFilter.project = { $eq: filter.project };
+    queryOptions.filter = metadataFilter;
+  }
+
+  const searchResponse = await pineconeIndex.query(queryOptions);
+
+  return (searchResponse.matches || [])
+    .filter((match: any) => match.score >= effectiveMinScore)
+    .map((match: any) => ({
+      text: match.metadata?.text || '',
+      filename: match.metadata?.filename || '',
+      score: match.score || 0,
+    }));
 }
 
 export default pinecone;
