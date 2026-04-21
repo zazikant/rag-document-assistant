@@ -6,6 +6,9 @@ export async function DELETE() {
     await pineconeIndex.deleteAll();
     return NextResponse.json({ status: 'Index reset complete' });
   } catch (error: any) {
+    if (error.status === 404) {
+      return NextResponse.json({ status: 'Index reset complete' });
+    }
     return NextResponse.json(
       { status: 'Error', error: error.message },
       { status: 500 }
