@@ -1,36 +1,148 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RAG Document Assistant API
 
-## Getting Started
+**Base URL:** `https://rag-document-assistant-three.vercel.app`
 
-First, run the development server:
+---
+
+## 1. Ingest Document (raw text)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/ingest" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Your content here",
+    "filename": "filename.txt",
+    "metadata": {
+      "doc_type": "token",
+      "project": "gem",
+      "version": "1.0"
+    }
+  }'
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 2. Upload PDF File (FormData, must be <4.5MB)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -F "file=@/path/to/file.pdf" \
+  -F "name=file.pdf" \
+  -F "mode=Add"
+```
 
-## Learn More
+**Modes:** `Add`, `Replace`, `Delete`
 
-To learn more about Next.js, take a look at the following resources:
+**Types:** `Add` or `Replace` modes support PDF (`file=@`) or raw text (`content=`).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+**Example with Windows path:**
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -F "file=@D:\test\pdf-sample_0.pdf" \
+  -F "name=pdf-sample_0.pdf" \
+  -F "mode=Add"
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## 3. Upload via JSON (base64-encoded PDF or text)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "pdf",
+    "content": "<base64-encoded-file>",
+    "name": "document.pdf",
+    "mode": "Add"
+  }'
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Or for text content:
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "text",
+    "content": "Your raw text content here",
+    "name": "document.txt",
+    "mode": "Add"
+  }'
+```
+
+---
+
+## 4. Query Document
+
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Your question here"}'
+```
+
+Example:
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the total supply of GEM tokens?"}'
+```
+
+With filters:
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Your question",
+    "top_k": 8,
+    "filters": {
+      "doc_type": "token",
+      "project": "gem"
+    }
+  }'
+```
+
+---
+
+## 5. List Documents
+
+```bash
+curl -X GET "https://rag-document-assistant-three.vercel.app/api/documents"
+```
+
+---
+
+## 6. Delete Index Document (by filename)
+
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -F "name=filename.pdf" \
+  -F "mode=Delete"
+```
+
+Example:
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -F "name=pdf-sample_0.pdf" \
+  -F "mode=Delete"
+```
+
+**Response:** `{"status":"Deleted"}`
+
+---
+
+## 7. Reset Index (delete ALL Pinecone records)
+
+```bash
+curl -X DELETE "https://rag-document-assistant-three.vercel.app/api/index/reset"
+```
+
+---
+
+## Notes
+
+- **File size limit:** 4.5MB max (Vercel serverless payload limit)
+- **Supported formats:** PDF, TXT, MD (via file upload) and raw text (via ingest)
+- **Aggregation queries** (all, every, list, how many, total, count): automatically uses topK=50, minScore=0.50
+- **Regular queries:** topK=8, minScore=0.70
+- **Chunk metadata:** `doc_type`, `project`, `version`, `uploaded_at` stored with every chunk
+- **Replace mode:** Auto-deletes old chunks for same filename before inserting new ones
