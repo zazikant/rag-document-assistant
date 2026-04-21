@@ -50,28 +50,49 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 **Modes:** `Add`, `Replace`, `Delete`
 
-**Replace example (JSON):**
+**Replace example (JSON) — replaces content at same filename:**
 ```bash
+# First: Add initial content
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "text",
-    "content": "Updated document content here",
-    "name": "my_document.txt",
+    "content": "phone number of shashikant is 9869101909",
+    "name": "shashikant.txt",
+    "mode": "Add"
+  }'
+
+# Second: Replace — same filename overwrites old content
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "text",
+    "content": "phone number of shashikant is 7777016824",
+    "name": "shashikant.txt",
     "mode": "Replace"
   }'
+# After replace: only 7777016824 is stored. Old chunks deleted automatically.
 ```
 
 **PowerShell example:**
 ```powershell
-$body = @{
+# Add initial
+$body1 = @{
     type = "text"
-    content = "Updated document content here"
-    name = "my_document.txt"
+    content = "phone number of shashikant is 9869101909"
+    name = "shashikant.txt"
+    mode = "Add"
+} | ConvertTo-Json -Compress
+Invoke-RestMethod -Uri "..." -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body1
+
+# Replace with updated content — same filename
+$body2 = @{
+    type = "text"
+    content = "phone number of shashikant is 7777016824"
+    name = "shashikant.txt"
     mode = "Replace"
 } | ConvertTo-Json -Compress
-
-Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+Invoke-RestMethod -Uri "..." -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body2
 ```
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
