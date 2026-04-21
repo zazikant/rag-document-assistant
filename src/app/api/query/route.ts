@@ -95,6 +95,7 @@ export async function POST(request: NextRequest) {
     // =================== STEP 3: AGGREGATE BY DOCUMENT ===================
     const aggregated = rerankAndAggregate(validHits);
 
+
     // =================== STEP 4: BUILD CONTEXT ===================
     const context = buildContextFromAggregated(aggregated, 5000);
 
