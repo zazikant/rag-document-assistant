@@ -50,7 +50,29 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 **Modes:** `Add`, `Replace`, `Delete`
 
-**Example with Windows path:**
+**Replace example (JSON):**
+```bash
+curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "text",
+    "content": "Updated document content here",
+    "name": "my_document.txt",
+    "mode": "Replace"
+  }'
+```
+
+**PowerShell example:**
+```powershell
+$body = @{
+    type = "text"
+    content = "Updated document content here"
+    name = "my_document.txt"
+    mode = "Replace"
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+```
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   -F "file=@D:\test\Values Description PDF.pdf" \
