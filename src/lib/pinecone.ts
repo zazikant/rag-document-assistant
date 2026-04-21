@@ -96,6 +96,7 @@ export async function upsertRecords(
     await pineconeIndex.upsert({ records: vectors });
   }
 
+
   return {
     status: 'success',
     filename,
