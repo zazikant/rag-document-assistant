@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { searchRecords } from '@/lib/pinecone';
+import { searchRecords, rerankAndAggregate, buildContextFromAggregated } from '@/lib/pinecone';
 import { nvidiaChatCompletion } from '@/lib/nvidia';
 import { supabase, DOCUMENTS_TABLE } from '@/lib/supabase';
 
-export const maxDuration = 120; // 2 min to accommodate up to 3 retries × 15s wait
+export const maxDuration = 180;
 
 interface QueryRequest {
   query: string;
@@ -12,20 +12,36 @@ interface QueryRequest {
     doc_type?: string;
     project?: string;
   };
+  mode?: 'conversational' | 'precise';
 }
 
-const SYSTEM_PROMPT = `You are a factual document assistant. STRICT RULES:
-1. ONLY use information from the provided Context to answer questions.
-2. If the Context does NOT contain the information needed to answer, say "I don't know" or "The provided documents do not contain this information."
-3. NEVER guess, infer, or use your training knowledge to fill gaps.
-4. NEVER say things like "based on general knowledge" or add information not in Context.
-5. Always cite the source document using [Document: filename] notation.
-6. CEO = MD = Chief Executive Officer = Head; CFO = Finance Head, COO = Operations Head only apply if mentioned in Context.`;
+const SYSTEM_PROMPT = `You are a helpful coding assistant and second brain. STRICT RULES:
+1. Use the provided Context to answer the Question thoroughly and accurately.
+2. If the Context mentions something related to the question, use that information.
+3. If the Context does NOT contain relevant information, say "I don't have that information in my knowledge base."
+4. Be concise but comprehensive in your answers.
+5. Always cite sources using [Document: filename] when using information from Context.
+6. For coding questions: suggest code examples, patterns, or architecture when relevant.
+7. Never make up APIs, function names, or implementation details not in Context.`;
+
+const REDUCER_PROMPT = `You are a research assistant. Given multiple document chunks about the same topic, synthesize them into a coherent summary.
+
+Task:
+1. Extract key information from each chunk
+2. Merge overlapping information
+3. Note any conflicts or differences
+4. Provide a unified, comprehensive response
+
+Format your response as:
+- Key Points: (bulleted list of main findings)
+- Details: (comprehensive answer combining all sources)
+- Conflicts: (any disagreements between sources, or "None" if consistent)
+- Sources: (list of which documents contributed)`;
 
 export async function POST(request: NextRequest) {
   try {
     const body: QueryRequest = await request.json();
-    const { query, top_k, filters } = body;
+    const { query, top_k, filters, mode = 'conversational' } = body;
 
     if (!query || query.trim().length === 0) {
       return NextResponse.json(
@@ -34,10 +50,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const effectiveTopK = mode === 'precise' ? 5 : 12;
+
     // =================== STEP 1: SEARCH PINECONE ===================
-    let hits: Array<{ text: string; filename: string; score: number }>;
+    let hits;
     try {
-      hits = await searchRecords(query, top_k || 8, 0.70, filters);
+      hits = await searchRecords(query, effectiveTopK, 0.50, filters);
     } catch (error: any) {
       console.error('Pinecone search error:', error);
       return NextResponse.json(
@@ -48,16 +66,15 @@ export async function POST(request: NextRequest) {
 
     if (!hits || hits.length === 0) {
       return NextResponse.json({
-        answer: 'No relevant documents found for your query. Please upload some documents first.',
+        answer: 'No relevant documents found. Upload some documents to build your knowledge base.',
         sources: [],
+        aggregatedContext: null,
       });
     }
 
-    // =================== STEP 2: VALIDATE SOURCES & BUILD CONTEXT ===================
-    // Collect unique source filenames
+    // =================== STEP 2: VALIDATE SOURCES ===================
     const rawSources = [...new Set(hits.map((h) => h.filename))];
 
-    // Validate sources against Supabase documents table - only return filenames that exist in DB
     const { data: validDocuments } = await supabase
       .from(DOCUMENTS_TABLE)
       .select('filename')
@@ -65,40 +82,57 @@ export async function POST(request: NextRequest) {
 
     const validFilenames = new Set((validDocuments || []).map((d: any) => d.filename));
     const sources = rawSources.filter((f: string) => validFilenames.has(f));
-
-    // Filter hits to only include those from valid documents (for LLM context)
     const validHits = hits.filter((h) => validFilenames.has(h.filename));
 
-    // CRITICAL: If top valid hit has low relevance, don't let LLM hallucinate
-    const topScore = validHits.length > 0 ? validHits[0].score : 0;
-    if (topScore < 0.55) {
+    if (validHits.length === 0) {
       return NextResponse.json({
-        answer: "I don't know. The available documents do not contain relevant information to answer this question.",
+        answer: 'Found documents but none are in the verified index. Try re-uploading.',
         sources: [],
+        aggregatedContext: null,
       });
     }
 
-    const context = validHits
-      .map((hit) => `[Document: ${hit.filename}]\n${hit.text}`)
-      .join('\n\n---\n\n');
+    // =================== STEP 3: AGGREGATE BY DOCUMENT ===================
+    const aggregated = rerankAndAggregate(validHits);
 
-    // =================== STEP 3: CALL NVIDIA LLM (with built-in retry) ===================
+    // =================== STEP 4: BUILD CONTEXT ===================
+    const context = buildContextFromAggregated(aggregated, 5000);
+
+    // =================== STEP 5: REDUCE/SUMMARIZE (for multi-chunk answers) ===================
+    let reducedContext = context;
+
+    if (aggregated.some(a => a.chunkCount > 1)) {
+      try {
+        const reduceMessages = [
+          { role: 'system' as const, content: REDUCER_PROMPT },
+          { role: 'user' as const, content: `Question: ${query}\n\nContext:\n${context}\n\nPlease synthesize this information.` }
+        ];
+
+        const reduced = await nvidiaChatCompletion({
+          messages: reduceMessages,
+          temperature: 0.2,
+          maxTokens: 1024,
+        });
+
+        reducedContext = reduced.choices[0]?.message?.content || context;
+      } catch (error: any) {
+        console.warn('Reducer failed, using raw context:', error.message);
+      }
+    }
+
+    // =================== STEP 6: FINAL ANSWER ===================
     const messages = [
-      {
-        role: 'system' as const,
-        content: SYSTEM_PROMPT,
-      },
+      { role: 'system' as const, content: SYSTEM_PROMPT },
       {
         role: 'user' as const,
-        content: `Context:\n${context}\n\n---\n\nQuestion: ${query}`,
+        content: `Context:\n${reducedContext}\n\n---\n\nQuestion: ${query}`,
       },
     ];
 
     try {
-      // nvidiaChatCompletion now retries up to 3 times on timeout / rate-limit (429/5xx)
       const completion = await nvidiaChatCompletion({
         messages,
-        temperature: 0.3, // Lower temperature for factual RAG responses
+        temperature: mode === 'precise' ? 0.1 : 0.3,
         maxTokens: 2048,
       });
 
@@ -107,11 +141,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         answer,
         sources,
+        aggregatedContext: reducedContext !== context ? reducedContext : null,
+        debug: {
+          hitsFound: validHits.length,
+          documentsAggregated: aggregated.length,
+          reducerUsed: aggregated.some(a => a.chunkCount > 1),
+        }
       });
     } catch (error: any) {
       console.error('LLM error after retries:', error);
       const errMsg = error?.status === 429
-        ? 'LLM rate limit exceeded — please try again in a moment'
+        ? 'LLM rate limit exceeded — please try again'
         : error?.status >= 500
           ? 'LLM server error — please try again later'
           : `LLM error: ${error.message}`;

@@ -12,7 +12,6 @@ export const EMBEDDING_DIMENSION = 1024;
 
 /**
  * Chunk text into overlapping pieces for embedding.
- * Simple overlapping chunker matching the reference Python implementation.
  */
 function chunkText(text: string, chunkSize: number = 500, overlap: number = 50): string[] {
   if (!text || text.length === 0) return [];
@@ -42,9 +41,6 @@ export interface ChunkMetadata {
 
 /**
  * Upsert document chunks into Pinecone using multilingual-e5-large.
- * - Deletes previous chunks for the same filename
- * - Embeds with correct input_type="passage"
- * - Upserts with full metadata (filename, text, chunk_index, total_chunks, doc_type, project, version, uploaded_at)
  */
 export async function upsertRecords(
   text: string,
@@ -96,7 +92,6 @@ export async function upsertRecords(
     },
   }));
 
-  // 5. Upsert to Pinecone
   if (vectors.length > 0) {
     await pineconeIndex.upsert({ records: vectors });
   }
@@ -124,10 +119,123 @@ export async function deleteRecords(filename: string): Promise<void> {
   }
 }
 
+const QUERY_EXPANSION_MAP: Record<string, string[]> = {
+  'owner': ['responsible', 'lead', 'manager', 'accountable', 'main'],
+  'owners': ['responsible', 'lead', 'manager', 'accountable', 'main'],
+  'lead': ['leader', 'manager', 'head', 'owner', 'responsible'],
+  'leads': ['leader', 'manager', 'head', 'owner', 'responsible'],
+  'manager': ['lead', 'leader', 'head', 'owner', 'responsible'],
+  'team': ['group', 'department', 'squad', 'unit', 'members'],
+  'project': ['initiative', 'system', 'application', 'service', 'platform'],
+  'architecture': ['design', 'structure', 'system design', 'technical design'],
+  'database': ['db', 'storage', 'postgres', 'postgresql', 'data'],
+  'api': ['endpoint', 'rest', 'service', 'interface', 'route'],
+  'deploy': ['deployment', 'release', 'publish', 'host', 'server'],
+  'config': ['configuration', 'settings', 'env', 'environment'],
+  'error': ['bug', 'issue', 'problem', 'failure', 'exception'],
+  'test': ['testing', 'qa', 'unit test', 'integration test'],
+};
+
+function expandQuery(query: string): string[] {
+  const words = query.toLowerCase().split(/\s+/);
+  const expanded = [query];
+
+  for (const word of words) {
+    const synonyms = QUERY_EXPANSION_MAP[word];
+    if (synonyms) {
+      for (const synonym of synonyms) {
+        const expandedQuery = query.toLowerCase().replace(word, synonym);
+        if (expandedQuery.toLowerCase() !== query.toLowerCase()) {
+          expanded.push(expandedQuery);
+        }
+      }
+    }
+  }
+
+  return expanded;
+}
+
+export interface SearchHit {
+  text: string;
+  filename: string;
+  score: number;
+  chunk_index?: number;
+  total_chunks?: number;
+}
+
+export interface AggregatedHit {
+  filename: string;
+  chunks: { text: string; score: number }[];
+  totalScore: number;
+  avgScore: number;
+  chunkCount: number;
+}
+
+function rerankAndAggregate(hits: SearchHit[]): AggregatedHit[] {
+  const byFile = new Map<string, AggregatedHit>();
+
+  for (const hit of hits) {
+    if (!byFile.has(hit.filename)) {
+      byFile.set(hit.filename, {
+        filename: hit.filename,
+        chunks: [],
+        totalScore: 0,
+        avgScore: 0,
+        chunkCount: 0,
+      });
+    }
+
+    const agg = byFile.get(hit.filename)!;
+    agg.chunks.push({ text: hit.text, score: hit.score });
+    agg.totalScore += hit.score;
+    agg.chunkCount++;
+  }
+
+  for (const agg of byFile.values()) {
+    agg.avgScore = agg.totalScore / agg.chunkCount;
+  }
+
+  const aggregated = Array.from(byFile.values());
+
+  return aggregated.sort((a, b) => {
+    const scoreA = a.avgScore * Math.log(a.chunkCount + 1);
+    const scoreB = b.avgScore * Math.log(b.chunkCount + 1);
+    return scoreB - scoreA;
+  });
+}
+
+function buildContextFromAggregated(aggregated: AggregatedHit[], maxChars: number = 4000): string {
+  let context = '';
+  let remaining = maxChars;
+
+  for (const hit of aggregated) {
+    const sortedChunks = hit.chunks.sort((a, b) => b.score - a.score);
+    const combined = sortedChunks.map(c => c.text).join('\n\n');
+
+    if (combined.length <= remaining) {
+      context += `[Document: ${hit.filename}]\n${combined}\n\n---\n\n`;
+      remaining -= combined.length;
+    } else {
+      let acc = '';
+      for (const chunk of sortedChunks) {
+        if (acc.length + chunk.text.length + 50 <= remaining) {
+          acc += chunk.text + '\n\n';
+        } else {
+          break;
+        }
+      }
+      if (acc.length > 0) {
+        context += `[Document: ${hit.filename}]\n${acc}\n\n---\n\n`;
+      }
+    }
+  }
+
+  return context.trim();
+}
+
 /**
  * Search Pinecone for relevant chunks using multilingual-e5-large.
- * Uses input_type="query" for the search query.
- * Returns top-K hits with metadata (text, filename).
+ * Supports query expansion and aggregated results by filename.
  */
 export async function searchRecords(
   query: string,
@@ -135,45 +243,66 @@ export async function searchRecords(
   minScore: number = 0.70,
   filter?: { doc_type?: string; project?: string },
   forceAggregation?: boolean
-): Promise<Array<{ text: string; filename: string; score: number }>> {
+): Promise<SearchHit[]> {
   const aggregationKeywords = ['all', 'every', 'list', 'how many', 'compare', 'show me', 'find all', 'get all', 'total', 'count'];
   const isAggregation = forceAggregation || aggregationKeywords.some(kw => query.toLowerCase().includes(kw));
   const effectiveTopK = isAggregation ? 50 : topK;
   const effectiveMinScore = isAggregation ? 0.50 : minScore;
 
-  const queryEmbedding = await pinecone.inference.embed({
-    model: EMBEDDING_MODEL,
-    inputs: [query],
-    parameters: {
-      input_type: 'query',
-      truncate: 'END',
-    },
-  });
+  const expandedQueries = expandQuery(query);
+  const allHits: SearchHit[] = [];
 
-  const queryVector = (queryEmbedding.data as any[])[0].values as number[];
+  for (const expandedQuery of expandedQueries) {
+    const queryEmbedding = await pinecone.inference.embed({
+      model: EMBEDDING_MODEL,
+      inputs: [expandedQuery],
+      parameters: {
+        input_type: 'query',
+        truncate: 'END',
+      },
+    });
 
-  const queryOptions: any = {
-    vector: queryVector,
-    topK: effectiveTopK,
-    includeMetadata: true,
-  };
+    const queryVector = (queryEmbedding.data as any[])[0].values as number[];
 
-  if (filter && (filter.doc_type || filter.project)) {
-    const metadataFilter: any = {};
-    if (filter.doc_type) metadataFilter.doc_type = { $eq: filter.doc_type };
-    if (filter.project) metadataFilter.project = { $eq: filter.project };
-    queryOptions.filter = metadataFilter;
+    const queryOptions: any = {
+      vector: queryVector,
+      topK: effectiveTopK,
+      includeMetadata: true,
+    };
+
+    if (filter && (filter.doc_type || filter.project)) {
+      const metadataFilter: any = {};
+      if (filter.doc_type) metadataFilter.doc_type = { $eq: filter.doc_type };
+      if (filter.project) metadataFilter.project = { $eq: filter.project };
+      queryOptions.filter = metadataFilter;
+    }
+
+    const searchResponse = await pineconeIndex.query(queryOptions);
+
+    const hits: SearchHit[] = (searchResponse.matches || [])
+      .filter((match: any) => match.score >= effectiveMinScore)
+      .map((match: any) => ({
+        text: match.metadata?.text || '',
+        filename: match.metadata?.filename || '',
+        score: match.score || 0,
+        chunk_index: match.metadata?.chunk_index,
+        total_chunks: match.metadata?.total_chunks,
+      }));
+
+    allHits.push(...hits);
   }
 
-  const searchResponse = await pineconeIndex.query(queryOptions);
+  const deduped = new Map<string, SearchHit>();
+  for (const hit of allHits) {
+    const key = `${hit.filename}_${hit.text.substring(0, 100)}`;
+    if (!deduped.has(key) || deduped.get(key)!.score < hit.score) {
+      deduped.set(key, hit);
+    }
+  }
 
-    return (searchResponse.matches || [])
-    .filter((match: any) => match.score >= effectiveMinScore)
-    .map((match: any) => ({
-      text: match.metadata?.text || '',
-      filename: match.metadata?.filename || '',
-      score: match.score || 0,
-    }));
+  return Array.from(deduped.values()).sort((a, b) => b.score - a.score);
 }
+
+export { rerankAndAggregate, buildContextFromAggregated, expandQuery };
 
 export default pinecone;
