@@ -2,6 +2,8 @@
 
 **Base URL:** `https://rag-document-assistant-three.vercel.app`
 
+A second-brain RAG system with query expansion, document aggregation, and LLM-powered synthesis.
+
 ---
 
 ## 1. Ingest Document (raw text)
@@ -48,8 +50,6 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 **Modes:** `Add`, `Replace`, `Delete`
 
-**Types:** `Add` or `Replace` modes support PDF (`file=@`) or raw text (`content=`).
-
 **Example with Windows path:**
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
@@ -86,14 +86,14 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   }'
 ```
 
-**PowerShell example for text upload:**
+**PowerShell example:**
 ```powershell
 $body = @{
     type = "text"
     content = "Your raw text content here"
     name = "document.txt"
     mode = "Add"
-} | ConvertTo-Json
+} | ConvertTo-Json -Compress
 
 Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 ```
@@ -108,14 +108,19 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
   -d '{"query": "Your question here"}'
 ```
 
-Example:
+**With mode (conversational or precise):**
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
   -H "Content-Type: application/json" \
-  -d '{"query": "What is the total supply of GEM tokens?"}'
+  -d '{"query": "Your question", "mode": "conversational"}'
 ```
 
-With filters:
+| Mode | Description |
+|------|-------------|
+| `conversational` | Broader search, uses topK=12, good for exploration |
+| `precise` | Focused search, uses topK=5, good for specific answers |
+
+**With filters:**
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
   -H "Content-Type: application/json" \
@@ -129,13 +134,37 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
   }'
 ```
 
-**PowerShell example:**
+**PowerShell examples:**
 ```powershell
+# Conversational (default)
 $body = @{
-    query = "What is the total supply of GEM tokens?"
+    query = "What is the architecture?"
+    mode = "conversational"
 } | ConvertTo-Json -Compress
 
 Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+
+# Precise
+$body = @{
+    query = "Who is the project lead?"
+    mode = "precise"
+} | ConvertTo-Json -Compress
+
+Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+```
+
+**Response includes:**
+```json
+{
+  "answer": "The synthesized answer...",
+  "sources": ["doc1.md", "doc2.pdf"],
+  "aggregatedContext": "Key Points: ...",
+  "debug": {
+    "hitsFound": 7,
+    "documentsAggregated": 3,
+    "reducerUsed": true
+  }
+}
 ```
 
 ---
@@ -148,7 +177,7 @@ curl -X GET "https://rag-document-assistant-three.vercel.app/api/documents"
 
 ---
 
-## 6. Delete Index Document (by filename)
+## 6. Delete Document (by filename)
 
 ```bash
 curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
@@ -173,13 +202,41 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 curl -X DELETE "https://rag-document-assistant-three.vercel.app/api/index/reset"
 ```
 
+**Response:** `{"status":"Index reset complete"}`
+
+---
+
+## Features
+
+### Query Expansion
+Automatically expands synonyms to improve recall:
+- `owner` → `responsible`, `lead`, `manager`, `accountable`
+- `team` → `group`, `department`, `squad`
+- `api` → `endpoint`, `rest`, `service`
+- `database` → `db`, `postgres`, `storage`
+
+### Document Aggregation
+- Groups chunks by filename
+- Reranks by `avgScore * log(chunkCount + 1)`
+- Merges multiple relevant chunks into coherent context
+
+### LLM Reducer
+- Synthesizes multi-chunk answers
+- Extracts key points, detects conflicts
+- Produces unified, comprehensive responses
+
+### Mode Selection
+| Mode | topK | Use Case |
+|------|------|----------|
+| `conversational` | 12 | Exploration, broad questions |
+| `precise` | 5 | Specific facts, exact answers |
+
 ---
 
 ## Notes
 
 - **File size limit:** 4.5MB max (Vercel serverless payload limit)
 - **Supported formats:** PDF, TXT, MD (via file upload) and raw text (via ingest)
-- **Aggregation queries** (all, every, list, how many, total, count): automatically uses topK=50, minScore=0.50
-- **Regular queries:** topK=8, minScore=0.70
 - **Chunk metadata:** `doc_type`, `project`, `version`, `uploaded_at` stored with every chunk
-- **Replace mode:** Auto-deletes old chunks for same filename before inserting new ones
+- **Replace mode:** Auto-deletes old chunks before inserting new ones
+- **Source validation:** Only returns sources that exist in the verified documents table
