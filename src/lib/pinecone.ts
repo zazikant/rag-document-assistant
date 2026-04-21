@@ -106,9 +106,16 @@ export async function upsertRecords(
  * Delete all records for a given filename from Pinecone.
  */
 export async function deleteRecords(filename: string): Promise<void> {
-  await pineconeIndex.deleteMany({
-    filter: { filename: { $eq: filename } },
-  });
+  try {
+    await pineconeIndex.deleteMany({
+      filter: { filename: { $eq: filename } },
+    });
+  } catch (error: any) {
+    if (error.status === 404) {
+      return;
+    }
+    throw error;
+  }
 }
 
 /**
