@@ -7,7 +7,6 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { content, filename, metadata } = body;
 
-
     if (!content || !filename) {
       return NextResponse.json(
         { status: 'Error', error: 'content and filename are required' },
@@ -31,7 +30,6 @@ export async function POST(request: NextRequest) {
       version: metadata?.version || '1.0',
       uploaded_at: Date.now(),
     };
-
 
     const result = await upsertRecords(content, filename, fullMetadata);
 

@@ -25,7 +25,7 @@ export default function Home() {
 
   // Upload form state
   const [uploadMode, setUploadMode] = useState<'Add' | 'Replace' | 'Delete'>('Add');
-  const [uploadType, setUploadType] = useState<'pdf' | 'text'>('pdf');
+  const [uploadType, setUploadType] = useState<'file' | 'text'>('file');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [textContent, setTextContent] = useState('');
   const [uploadStatus, setUploadStatus] = useState<string>('');
@@ -184,7 +184,7 @@ export default function Home() {
       } else {
         formData.append('mode', uploadMode);
 
-        if (uploadType === 'pdf' && selectedFile) {
+        if (uploadType === 'file' && selectedFile) {
           formData.append('file', selectedFile);
           formData.append('name', selectedFile.name);
         } else if (uploadType === 'text' && textContent) {
@@ -370,7 +370,7 @@ export default function Home() {
                 <div className="mb-4">
                   <label className="block text-sm text-[var(--muted)] mb-2">Type</label>
                   <div className="flex gap-2">
-                    {(['pdf', 'text'] as const).map((t) => (
+                    {(['file', 'text'] as const).map((t) => (
                       <button
                         key={t}
                         onClick={() => {
@@ -384,16 +384,16 @@ export default function Home() {
                             : 'bg-[var(--card-border)] text-[var(--muted)] hover:text-white'
                         }`}
                       >
-                        {t === 'pdf' ? 'PDF File' : 'Raw Text'}
+                        {t === 'file' ? 'File' : 'Raw Text'}
                       </button>
                     ))}
                   </div>
                 </div>
 
-                {/* PDF File Upload */}
-                {uploadType === 'pdf' && (
+                {/* File Upload */}
+                {uploadType === 'file' && (
                   <div className="mb-4">
-                    <label className="block text-sm text-[var(--muted)] mb-2">PDF File</label>
+                    <label className="block text-sm text-[var(--muted)] mb-2">File</label>
                     <div
                       onClick={() => fileInputRef.current?.click()}
                       className="border-2 border-dashed border-[var(--card-border)] rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 transition-colors"
@@ -401,7 +401,7 @@ export default function Home() {
                       <input
                         ref={fileInputRef}
                         type="file"
-                        accept=".pdf"
+                        accept=".pdf,.txt,.md,.json"
                         onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
                         className="hidden"
                       />
@@ -415,7 +415,7 @@ export default function Home() {
                       ) : (
                         <div className="text-[var(--muted)]">
                           <p className="text-3xl mb-2">+</p>
-                          <p>Click to select a PDF file</p>
+                          <p>Click to select a file (PDF, TXT, MD)</p>
                         </div>
                       )}
                     </div>

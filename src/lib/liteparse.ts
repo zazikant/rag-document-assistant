@@ -66,7 +66,6 @@ export async function liteParse(
       buffer = content;
     }
 
-
     const ext = filename
       ? filename.toLowerCase().split('.').pop() || ''
       : type === 'pdf' ? 'pdf' : 'txt';

@@ -36,12 +36,12 @@ export async function POST(request: NextRequest) {
         // Delete mode — only need name, no file or content required
         type = 'text'; // placeholder, won't be used
         content = '';  // placeholder, won't be used
-      } else if (file) {
+        } else if (file) {
         // File upload — determine type from extension
         const ext = name.toLowerCase().split('.').pop() || '';
         if (ext === 'pdf') {
           type = 'pdf';
-        } else if (ext === 'txt' || ext === 'md') {
+        } else if (ext === 'txt' || ext === 'md' || ext === 'json') {
           type = 'text';
         } else {
           return NextResponse.json(
