@@ -111,7 +111,7 @@ export async function deleteRecords(filename: string): Promise<void> {
       filter: { filename: { $eq: filename } },
     });
   } catch (error: any) {
-    if (error.status === 404) {
+    if (error.status === 404 || error.statusCode === 404 || error.message?.includes('404')) {
       return;
     }
     throw error;
