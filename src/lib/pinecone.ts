@@ -62,9 +62,15 @@ export async function upsertRecords(
     return { status: 'error', filename, chunks: 0 };
   }
 
-  await pineconeIndex.deleteMany({
-    filter: { filename: { $eq: filename } },
-  });
+  try {
+    await pineconeIndex.deleteMany({
+      filter: { filename: { $eq: filename } },
+    });
+  } catch (error: any) {
+    if (error.status !== 404 && error.statusCode !== 404 && !error.message?.includes('404')) {
+      throw error;
+    }
+  }
 
   const embeddingsResponse = await pinecone.inference.embed({
     model: EMBEDDING_MODEL,
