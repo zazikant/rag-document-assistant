@@ -234,9 +234,39 @@ function buildContextFromAggregated(aggregated: AggregatedHit[], maxChars: numbe
   return context.trim();
 }
 
+const PERSON_QUERY_KEYWORDS = [
+  'who', 'person', 'rep', 'sales rep', 'account', 'manager', 'lead',
+  'founder', 'director', 'ceo', 'cto', 'vp', 'head of',
+];
+
+function isPersonQuery(query: string): boolean {
+  const lower = query.toLowerCase();
+  return PERSON_QUERY_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function roundRobinDiversify(hits: SearchHit[]): SearchHit[] {
+  const byFile = new Map<string, SearchHit[]>();
+  for (const hit of hits) {
+    if (!byFile.has(hit.filename)) byFile.set(hit.filename, []);
+    byFile.get(hit.filename)!.push(hit);
+  }
+
+  const diverse: SearchHit[] = [];
+  let round = 0;
+  while (diverse.length < hits.length && round < 10) {
+    for (const [, fileHits] of byFile) {
+      const chunk = fileHits[round];
+      if (chunk) diverse.push(chunk);
+    }
+    round++;
+  }
+  return diverse;
+}
+
 /**
  * Search Pinecone for relevant chunks using multilingual-e5-large.
- * Supports query expansion and aggregated results by filename.
+ * Supports query expansion, aggregated results by filename,
+ * and intelligent diversity sampling for person/entity queries.
  */
 export async function searchRecords(
   query: string,
@@ -247,7 +277,9 @@ export async function searchRecords(
 ): Promise<SearchHit[]> {
   const aggregationKeywords = ['all', 'every', 'list', 'how many', 'compare', 'show me', 'find all', 'get all', 'total', 'count'];
   const isAggregation = forceAggregation || aggregationKeywords.some(kw => query.toLowerCase().includes(kw));
-  const effectiveTopK = isAggregation ? 50 : topK;
+  const isPersonSearch = isPersonQuery(query);
+
+  const effectiveTopK = isAggregation ? 50 : (isPersonSearch ? 50 : topK);
   const effectiveMinScore = isAggregation ? 0.50 : minScore;
 
   const expandedQueries = expandQuery(query);
@@ -301,7 +333,13 @@ export async function searchRecords(
     }
   }
 
-  return Array.from(deduped.values()).sort((a, b) => b.score - a.score);
+  const sorted = Array.from(deduped.values()).sort((a, b) => b.score - a.score);
+
+  if (isPersonSearch) {
+    return roundRobinDiversify(sorted);
+  }
+
+  return sorted;
 }
 
 export { rerankAndAggregate, buildContextFromAggregated, expandQuery };
