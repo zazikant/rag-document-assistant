@@ -17,10 +17,8 @@ export const EMBEDDING_DIMENSION = 1024;
 function chunkText(text: string, chunkSize: number = 500, overlap: number = 50): string[] {
   if (!text || text.length === 0) return [];
 
-
   const chunks: string[] = [];
   let start = 0;
-
 
   while (start < text.length) {
     const end = start + chunkSize;
@@ -130,7 +128,6 @@ export async function searchRecords(
   const effectiveTopK = isAggregation ? 50 : topK;
   const effectiveMinScore = isAggregation ? 0.50 : minScore;
 
-
   const queryEmbedding = await pinecone.inference.embed({
     model: EMBEDDING_MODEL,
     inputs: [query],
@@ -141,7 +138,6 @@ export async function searchRecords(
   });
 
   const queryVector = (queryEmbedding.data as any[])[0].values as number[];
-
 
   const queryOptions: any = {
     vector: queryVector,
@@ -158,7 +154,7 @@ export async function searchRecords(
 
   const searchResponse = await pineconeIndex.query(queryOptions);
 
-  return (searchResponse.matches || [])
+    return (searchResponse.matches || [])
     .filter((match: any) => match.score >= effectiveMinScore)
     .map((match: any) => ({
       text: match.metadata?.text || '',

@@ -58,21 +58,17 @@ function findJsonRecords(text: string): string[] {
       continue;
     }
 
-
     if (char === '\\') {
       escape = true;
       continue;
     }
-
 
     if (char === '"' && !escape) {
       inString = !inString;
       continue;
     }
 
-
     if (inString) continue;
-
 
     if (char === '{' || char === '[') {
       if (depth === 0) start = i;
@@ -171,7 +167,6 @@ function recordBasedChunking(text: string, boundaries: number[]): ChunkResult {
   return { chunks, recordsFound: boundaries.length - 1 };
 }
 
-
 function fixedSizeChunking(text: string): ChunkResult {
   const chunks: string[] = [];
   const overlapSize = Math.floor(CHUNK_SIZE_MAX * OVERLAP_PERCENT);
@@ -179,7 +174,6 @@ function fixedSizeChunking(text: string): ChunkResult {
 
   while (start < text.length) {
     let end = start + CHUNK_SIZE_MAX;
-
 
     if (end < text.length) {
       const searchStart = Math.max(start + CHUNK_SIZE_MAX - 100, start);

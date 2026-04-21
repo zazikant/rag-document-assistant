@@ -26,7 +26,6 @@ export async function POST(request: NextRequest) {
     const body: QueryRequest = await request.json();
     const { query, top_k, filters } = body;
 
-
     if (!query || query.trim().length === 0) {
       return NextResponse.json(
         { status: 'Error', error: 'Query is required' },
@@ -60,7 +59,6 @@ export async function POST(request: NextRequest) {
 
     // Collect unique source filenames
     const sources = [...new Set(hits.map((h) => h.filename))];
-
 
     // =================== STEP 3: CALL NVIDIA LLM (with built-in retry) ===================
     const messages = [
