@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { searchRecords } from '@/lib/pinecone';
 import { nvidiaChatCompletion } from '@/lib/nvidia';
+import { supabase, DOCUMENTS_TABLE } from '@/lib/supabase';
 
 export const maxDuration = 120; // 2 min to accommodate up to 3 retries × 15s wait
 
@@ -52,13 +53,25 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // =================== STEP 2: BUILD CONTEXT ===================
-    const context = hits
+    // =================== STEP 2: VALIDATE SOURCES & BUILD CONTEXT ===================
+    // Collect unique source filenames
+    const rawSources = [...new Set(hits.map((h) => h.filename))];
+
+    // Validate sources against Supabase documents table - only return filenames that exist in DB
+    const { data: validDocuments } = await supabase
+      .from(DOCUMENTS_TABLE)
+      .select('filename')
+      .in('filename', rawSources);
+
+    const validFilenames = new Set((validDocuments || []).map((d: any) => d.filename));
+    const sources = rawSources.filter((f: string) => validFilenames.has(f));
+
+    // Filter hits to only include those from valid documents (for LLM context)
+    const validHits = hits.filter((h) => validFilenames.has(h.filename));
+
+    const context = validHits
       .map((hit) => `[Document: ${hit.filename}]\n${hit.text}`)
       .join('\n\n---\n\n');
-
-    // Collect unique source filenames
-    const sources = [...new Set(hits.map((h) => h.filename))];
 
     // =================== STEP 3: CALL NVIDIA LLM (with built-in retry) ===================
     const messages = [
