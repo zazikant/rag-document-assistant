@@ -1,3 +1,5 @@
+#### just information: supabase database is on drkavitaclinics gmail account 
+
 # RAG Document Assistant API
 
 **Base URL:** `https://rag-document-assistant-three.vercel.app`
