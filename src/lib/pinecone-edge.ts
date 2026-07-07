@@ -204,7 +204,13 @@ async function getIndexHost(): Promise<string> {
   }
 
   const data = await response.json();
-  cachedIndexHost = data.host;
+  const host: string | undefined | null = data?.host;
+  if (!host || typeof host !== 'string') {
+    throw new Error(
+      `Pinecone index "${PINECONE_INDEX_NAME}" response did not contain a valid host field`,
+    );
+  }
+  cachedIndexHost = host;
   return cachedIndexHost;
 }
 
