@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { LivePipelineLog, type LiveEvent } from './LivePipelineLog';
 
 interface ChatMessage {
   id: string;
@@ -8,6 +9,7 @@ interface ChatMessage {
   content: string;
   sources?: string[];
   error?: boolean;
+  streaming?: boolean;
 }
 
 interface QueryPanelProps {
@@ -18,8 +20,30 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [liveText, setLiveText] = useState('');
+  const [showLiveLog, setShowLiveLog] = useState(true);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const liveTextRef = useRef('');
+
+  useEffect(() => {
+    liveTextRef.current = liveText;
+  }, [liveText]);
+
+  // Update the streaming message as live text arrives
+  useEffect(() => {
+    if (streamingMessageId && liveText) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === streamingMessageId && m.streaming
+            ? { ...m, content: liveText }
+            : m,
+        ),
+      );
+    }
+  }, [liveText, streamingMessageId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -27,7 +51,77 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages]);
+  }, [messages, liveText]);
+
+  /**
+   * Streaming query — calls /api/query-stream (SSE) and consumes events.
+   * Each event updates liveEvents + (for chunks) liveText in real time.
+   * Returns the final answer + sources, or throws on failure.
+   */
+  const streamQuery = useCallback(async (
+    userQuery: string,
+    mode: 'conversational' | 'precise' = 'conversational',
+  ): Promise<{ answer: string; sources: string[] }> => {
+    const response = await fetch('/api/query-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: userQuery, mode }),
+    });
+
+    if (!response.ok || !response.body) {
+      const errText = await response.text().catch(() => '(no body)');
+      throw new Error(`Stream request failed (HTTP ${response.status}): ${errText.slice(0, 200)}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalAnswer = '';
+    let finalSources: string[] = [];
+    let errorMessage: string | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let sepIdx;
+      while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+        const raw = buffer.slice(0, sepIdx);
+        buffer = buffer.slice(sepIdx + 2);
+        for (const line of raw.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (!data) continue;
+          try {
+            const ev = JSON.parse(data);
+            const evTs = ev.ts || Date.now();
+            setLiveEvents((prev) => [...prev, { ts: evTs, ...ev }]);
+
+            if (ev.type === 'chunk' && typeof ev.text === 'string') {
+              setLiveText((prev) => prev + ev.text);
+            } else if (ev.type === 'pipeline-end' && ev.result) {
+              if (ev.result.answer) finalAnswer = ev.result.answer;
+              if (ev.result.sources) finalSources = ev.result.sources;
+              if (ev.result.error) errorMessage = ev.result.error;
+            } else if (ev.type === 'error' && ev.message) {
+              errorMessage = ev.message;
+            }
+          } catch {
+            // Ignore malformed lines
+          }
+        }
+      }
+    }
+
+    if (errorMessage && !finalAnswer) {
+      throw new Error(errorMessage);
+    }
+    if (!finalAnswer) {
+      finalAnswer = liveTextRef.current || 'No answer generated.';
+    }
+    return { answer: finalAnswer, sources: finalSources };
+  }, []);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -43,44 +137,87 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
     setMessages((prev) => [...prev, userMessage]);
     setQuery('');
     setLoading(true);
+    setLiveEvents([]);
+    setLiveText('');
+
+    // Create a placeholder assistant message that we'll update as tokens stream
+    const assistantId = crypto.randomUUID();
+    setStreamingMessageId(assistantId);
+    setMessages((prev) => [...prev, {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+    }]);
 
     try {
-      const response = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: trimmed }),
-      });
+      const MAX_ATTEMPTS = 3;
+      let result: { answer: string; sources: string[] } | null = null;
+      let lastError = '';
 
-      const data = await response.json();
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+          setLiveEvents((prev) => [...prev, {
+            ts: Date.now(),
+            type: 'log',
+            line: `[pipeline] Query attempt ${attempt}/${MAX_ATTEMPTS} — retrying…`,
+          }]);
+          setLiveText('');
+        }
 
-      if (data.error) {
-        const errorMessage: ChatMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: data.error,
-          error: true,
-        };
-        setMessages((prev) => [...prev, errorMessage]);
+        try {
+          result = await streamQuery(trimmed, 'conversational');
+          break;
+        } catch (streamErr: unknown) {
+          const msg = streamErr instanceof Error ? streamErr.message : String(streamErr);
+          lastError = msg;
+          console.warn(`[Query] Attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}`);
+
+          setLiveEvents((prev) => [...prev, {
+            ts: Date.now(),
+            type: 'log',
+            line: `[pipeline] Attempt ${attempt}/${MAX_ATTEMPTS} FAILED: ${msg.slice(0, 150)}`,
+          }]);
+
+          if (attempt === MAX_ATTEMPTS) {
+            setLiveEvents((prev) => [...prev, {
+              ts: Date.now(),
+              type: 'log',
+              line: `[pipeline] All ${MAX_ATTEMPTS} attempts failed. Please try again.`,
+            }]);
+          }
+        }
+      }
+
+      if (result && result.answer) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: result!.answer, sources: result!.sources || [], streaming: false }
+              : m,
+          ),
+        );
       } else {
-        const assistantMessage: ChatMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: data.answer,
-          sources: data.sources || [],
-        };
-        setMessages((prev) => [...prev, assistantMessage]);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: `Query failed after ${MAX_ATTEMPTS} attempts: ${lastError}`, error: true, streaming: false }
+              : m,
+          ),
+        );
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to get response';
-      const errorMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: message,
-        error: true,
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: message, error: true, streaming: false }
+            : m,
+        ),
+      );
     } finally {
       setLoading(false);
+      setStreamingMessageId(null);
       inputRef.current?.focus();
     }
   };
@@ -166,9 +303,7 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
                 key={msg.id}
                 className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <div
-                  className={`max-w-[85%] ${msg.role === 'user' ? '' : ''}`}
-                >
+                <div className="max-w-[85%]">
                   {msg.role === 'assistant' && (
                     <div className="flex items-center gap-2 mb-1.5">
                       <div
@@ -203,6 +338,12 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
                     }}
                   >
                     {msg.content}
+                    {msg.streaming && (
+                      <span
+                        className="inline-block w-1.5 h-3.5 ml-0.5 align-text-bottom animate-pulse"
+                        style={{ background: 'var(--accent)' }}
+                      />
+                    )}
                   </div>
                   {/* Source tags */}
                   {msg.sources && msg.sources.length > 0 && (
@@ -234,8 +375,19 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
               </div>
             ))}
 
-            {/* Loading Indicator */}
-            {loading && (
+            {/* Live pipeline log (shows below messages while loading) */}
+            {loading && liveEvents.length > 0 && (
+              <div className="max-w-full">
+                <LivePipelineLog
+                  events={liveEvents}
+                  visible={showLiveLog}
+                  onClose={() => setShowLiveLog(!showLiveLog)}
+                />
+              </div>
+            )}
+
+            {/* Loading indicator (only when no events yet) */}
+            {loading && liveEvents.length === 0 && (
               <div className="flex justify-start">
                 <div>
                   <div className="flex items-center gap-2 mb-1.5">
@@ -260,30 +412,9 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
                   >
                     <div className="flex items-center gap-1.5">
                       <div className="flex gap-1">
-                        <span
-                          className="h-2 w-2 rounded-full animate-bounce"
-                          style={{
-                            background: 'var(--accent)',
-                            animationDelay: '0ms',
-                            animationDuration: '0.8s',
-                          }}
-                        />
-                        <span
-                          className="h-2 w-2 rounded-full animate-bounce"
-                          style={{
-                            background: 'var(--accent)',
-                            animationDelay: '150ms',
-                            animationDuration: '0.8s',
-                          }}
-                        />
-                        <span
-                          className="h-2 w-2 rounded-full animate-bounce"
-                          style={{
-                            background: 'var(--accent)',
-                            animationDelay: '300ms',
-                            animationDuration: '0.8s',
-                          }}
-                        />
+                        <span className="h-2 w-2 rounded-full animate-bounce" style={{ background: 'var(--accent)', animationDelay: '0ms', animationDuration: '0.8s' }} />
+                        <span className="h-2 w-2 rounded-full animate-bounce" style={{ background: 'var(--accent)', animationDelay: '150ms', animationDuration: '0.8s' }} />
+                        <span className="h-2 w-2 rounded-full animate-bounce" style={{ background: 'var(--accent)', animationDelay: '300ms', animationDuration: '0.8s' }} />
                       </div>
                       <span className="text-xs ml-2" style={{ color: 'var(--muted)' }}>
                         Searching documents…
@@ -323,12 +454,8 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
               border: '1px solid var(--card-border)',
               color: 'var(--foreground)',
             }}
-            onFocus={(e) => {
-              e.currentTarget.style.borderColor = 'var(--accent)';
-            }}
-            onBlur={(e) => {
-              e.currentTarget.style.borderColor = 'var(--card-border)';
-            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = 'var(--accent)'; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = 'var(--card-border)'; }}
           />
           <button
             type="submit"
@@ -339,12 +466,8 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
               color: loading || !query.trim() ? 'var(--muted)' : '#ffffff',
               cursor: loading || !query.trim() ? 'not-allowed' : 'pointer',
             }}
-            onMouseEnter={(e) => {
-              if (!loading && query.trim()) e.currentTarget.style.background = 'var(--accent-hover)';
-            }}
-            onMouseLeave={(e) => {
-              if (!loading && query.trim()) e.currentTarget.style.background = 'var(--accent)';
-            }}
+            onMouseEnter={(e) => { if (!loading && query.trim()) e.currentTarget.style.background = 'var(--accent-hover)'; }}
+            onMouseLeave={(e) => { if (!loading && query.trim()) e.currentTarget.style.background = 'var(--accent)'; }}
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
