@@ -1,10 +1,14 @@
 import { NextRequest } from 'next/server';
-import { searchRecords, rerankAndAggregate, buildContextFromAggregated } from '@/lib/pinecone';
+import { searchRecords, rerankAndAggregate, buildContextFromAggregated } from '@/lib/pinecone-edge';
 import { nvidiaChatStreamControlled } from '@/lib/nvidia';
-import { supabase, DOCUMENTS_TABLE } from '@/lib/supabase';
+
+// Note: We use pinecone-edge (direct REST API) instead of pinecone (SDK)
+// because the Pinecone SDK pulls in node:stream which is unsupported in
+// Edge runtime. Same for @supabase/supabase-js — we use the REST API
+// directly when source validation is needed.
 
 /**
- * Streaming RAG query endpoint (Server-Sent Events).
+ * Streaming RAG query endpoint (Server-Sent Events) — DSPy-style.
  *
  * POST /api/query-stream
  *   { query, top_k?, filters?, mode? }
@@ -12,12 +16,14 @@ import { supabase, DOCUMENTS_TABLE } from '@/lib/supabase';
  * Response: text/event-stream with structured events:
  *   stage-start / log / chunk / stage-end / pipeline-end / error
  *
- * Pipeline:
+ * DSPy-style pipeline (ax-translator pattern):
  *   1. Search Pinecone
- *   2. Validate sources (Supabase)
+ *   2. Validate sources (Supabase) — skipped if Supabase not configured
  *   3. Aggregate by document
- *   4. Reduce (optional LLM call — only if multi-chunk)
- *   5. Answer (LLM call — streams tokens live)
+ *   4. Reduce (Signature: "context, question -> synthesized_context")
+ *      — only if multi-chunk aggregation
+ *   5. Answer (Signature: "context, question -> intelligent_answer")
+ *      — streams tokens live, up to 30K chars
  *
  * Each LLM call uses the ax-translator controlled-call pattern:
  *   - 28s per-call timeout (proven reliable for gpt-oss-120b on Vercel Edge)
@@ -43,32 +49,51 @@ interface QueryRequest {
   mode?: 'conversational' | 'precise';
 }
 
-const SYSTEM_PROMPT = `You are a helpful coding assistant and second brain. STRICT RULES:
-1. Use ONLY the provided Context to answer the Question. Do NOT guess or assume details.
-2. If the Context mentions something related to the question, use that information.
-3. If the Context does NOT contain relevant information, say "I don't have that information in my knowledge base."
-4. CRITICAL: When answering about specific entities (people, products, companies, etc.):
-   - ONLY use attributes explicitly stated in the Context
-   - Do NOT attribute characteristics from one entity to another
-   - If you cannot verify an attribute in Context, do NOT include it
-5. Be concise but comprehensive in your answers.
-6. Always cite sources using [Document: filename] when using information from Context.
-7. For coding questions: suggest code examples, patterns, or architecture when relevant.
-8. Never make up APIs, function names, or implementation details not in Context.`;
+// ─── DSPy-style Signature Prompts (ax-translator pattern) ─────
+// Like DSPy Modules — each prompt is a focused Signature with clear
+// input/output contracts. The model is told WHEN to be short vs long.
 
-const REDUCER_PROMPT = `You are a research assistant. Given multiple document chunks about the same topic, synthesize them into a coherent summary.
+const SYSTEM_PROMPT = `You are an intelligent second-brain assistant with deep reasoning ability. You don't merely retrieve — you REASON through the context to produce the smartest, most useful answer.
+
+STRICT FIDELITY RULES:
+1. Use ONLY the provided Context to answer. Do NOT guess or assume details not in Context.
+2. If the Context does NOT contain relevant information, say: "I don't have that information in my knowledge base."
+3. When discussing specific entities (people, products, companies), use ONLY attributes explicitly stated — never transfer characteristics from one entity to another.
+4. Always cite sources inline as [Document: filename] when using information from Context.
+5. Never fabricate APIs, function names, or implementation details not in Context.
+
+ADAPTIVE LENGTH (the key skill):
+Match your answer length to the question's complexity. Be CONCISE when the question is simple; be COMPREHENSIVE when the question is complex.
+
+- SHORT (2-4 sentences, ~200 chars): factual lookups — "What is X?", "Who owns Y?", "When did Z happen?"
+- MEDIUM (1-3 paragraphs, ~800 chars): how/why questions about a single concept
+- LONG (multiple sections, ~3000 chars): multi-faceted questions, architecture explanations, comparisons
+- VERY LONG (detailed with code/examples, up to 30000 chars): complex technical questions, full implementation guides, deep architectural reasoning, multi-step tutorials
+
+QUALITY RULES:
+- Lead with the direct answer, then expand. Don't bury the lede.
+- For coding questions: provide concrete code examples, patterns, and architecture when the context supports it.
+- For conceptual questions: structure with headers, bullet points, and clear reasoning.
+- For multi-part questions: address each part explicitly.
+- When the context has gaps, say what you CAN answer and explicitly note what's missing.
+- Be the smartest version of yourself — synthesize, infer logical consequences, draw connections the writer implied but didn't state.`;
+
+const REDUCER_PROMPT = `You are a research synthesis engine. Given multiple document chunks about the same topic, REASON through them to produce a coherent, comprehensive synthesis.
 
 Task:
 1. Extract key information from each chunk
-2. Merge overlapping information
-3. Note any conflicts or differences
-4. Provide a unified, comprehensive response
+2. Merge overlapping information intelligently (don't just concatenate)
+3. Note any conflicts or differences between sources
+4. Infer connections that span multiple chunks
+5. Provide a unified, comprehensive synthesis
 
 Format your response as:
-- Key Points: (bulleted list of main findings)
-- Details: (comprehensive answer combining all sources)
+- Key Points: (bulleted list of main findings, each 1-2 sentences)
+- Details: (comprehensive synthesis combining all sources, with inline citations)
 - Conflicts: (any disagreements between sources, or "None" if consistent)
-- Sources: (list of which documents contributed)`;
+- Sources: (list of which documents contributed)
+
+Be thorough — this synthesis will be used as context for the final answer, so include all relevant details from the chunks.`;
 
 interface SSEEvent {
   type: string;
@@ -139,18 +164,46 @@ export async function POST(request: NextRequest) {
         }
 
         // ─── STEP 2: VALIDATE SOURCES ─────────────────────────
+        // Use Supabase REST API directly (not the JS client) because the
+        // JS client pulls in node:stream which is unsupported in Edge runtime.
+        // If Supabase env vars are not set, skip validation and trust all hits.
         emit({ type: 'stage-start', stage: 'validate-sources' });
-        emit({ type: 'log', line: `[pipeline] Validating sources against Supabase documents table…` });
 
         const rawSources = [...new Set(hits.map((h) => h.filename))];
-        const { data: validDocuments } = await supabase
-          .from(DOCUMENTS_TABLE)
-          .select('filename')
-          .in('filename', rawSources);
+        let sources: string[];
+        let validHits: typeof hits;
 
-        const validFilenames = new Set((validDocuments || []).map((d: any) => d.filename));
-        const sources = rawSources.filter((f: string) => validFilenames.has(f));
-        const validHits = hits.filter((h) => validFilenames.has(h.filename));
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+        if (!supabaseUrl || !supabaseServiceKey) {
+          emit({ type: 'log', line: `[pipeline] Supabase not configured — skipping source validation (trusting all ${rawSources.length} hits)` });
+          sources = rawSources;
+          validHits = hits;
+        } else {
+          emit({ type: 'log', line: `[pipeline] Validating sources against Supabase documents table…` });
+          try {
+            // Fetch all documents and filter client-side.
+            // PostgREST's `in.()` filter breaks on filenames with parens
+            // (e.g. "file (1).md"), so we fetch all and filter in JS.
+            // The documents table is small (typically <100 rows).
+            const restUrl = `${supabaseUrl}/rest/v1/documents?select=filename`;
+            const restResponse = await fetch(restUrl, {
+              headers: {
+                apikey: supabaseServiceKey,
+                Authorization: `Bearer ${supabaseServiceKey}`,
+              },
+            });
+            const allDocs = restResponse.ok ? await restResponse.json() : [];
+            const validFilenames = new Set((allDocs || []).map((d: any) => d.filename));
+            sources = rawSources.filter((f: string) => validFilenames.has(f));
+            validHits = hits.filter((h) => validFilenames.has(h.filename));
+          } catch (supabaseError: any) {
+            emit({ type: 'log', line: `[pipeline] Supabase validation failed: ${supabaseError.message?.slice(0, 100)} — trusting all hits` });
+            sources = rawSources;
+            validHits = hits;
+          }
+        }
 
         emit({
           type: 'stage-end',
@@ -226,8 +279,12 @@ export async function POST(request: NextRequest) {
         }
 
         // ─── STEP 5: FINAL ANSWER (LLM call with live streaming) ──
+        // Signature: "context, question -> intelligent_answer"
+        // max_tokens=32768 supports up to ~30K char outputs for complex
+        // technical questions. The SYSTEM_PROMPT tells the model to be
+        // adaptive — short for simple lookups, long for complex reasoning.
         emit({ type: 'stage-start', stage: 'answer' });
-        emit({ type: 'log', line: `[pipeline] Generating final answer (streaming tokens live)…` });
+        emit({ type: 'log', line: `[pipeline] Generating final answer (streaming tokens live, up to 30K chars)…` });
 
         let answer = '';
         try {
@@ -237,7 +294,7 @@ export async function POST(request: NextRequest) {
               { role: 'user', content: `Context:\n${reducedContext}\n\n---\n\nQuestion: ${query}` },
             ],
             temperature: mode === 'precise' ? 0.1 : 0.3,
-            maxTokens: 2048,
+            maxTokens: 32768, // supports up to ~30K char outputs
             onLog: (line) => emit({ type: 'log', line }),
             onChunk: (text) => {
               answer += text;
