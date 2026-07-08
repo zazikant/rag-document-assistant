@@ -1,6 +1,6 @@
 # RAG Document Assistant API
 
-**Base URL:** `https://rag-document-assistant-three.vercel.app`
+**Base URL:** `https://rag-document-assistant-2.vercel.app`
 
 A second-brain RAG system with query expansion, document aggregation, and LLM-powered synthesis.
 
@@ -9,7 +9,7 @@ A second-brain RAG system with query expansion, document aggregation, and LLM-po
 ## 1. Ingest Document (raw text)
 
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/ingest" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/ingest" \
   -H "Content-Type: application/json" \
   -d '{
     "content": "Your content here",
@@ -34,7 +34,7 @@ $body = @{
     }
 } | ConvertTo-Json -Compress
 
-Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/ingest" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+Invoke-RestMethod -Uri "https://rag-document-assistant-2.vercel.app/api/ingest" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 ```
 
 ---
@@ -42,7 +42,7 @@ Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/inge
 ## 2. Upload PDF File (FormData, must be <4.5MB)
 
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -F "file=@/path/to/file.pdf" \
   -F "name=file.pdf" \
   -F "mode=Add"
@@ -53,7 +53,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 **Replace example (JSON) — replaces content at same filename:**
 ```bash
 # First: Add initial content
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "text",
@@ -63,7 +63,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
   }'
 
 # Second: Replace — same filename overwrites old content
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "text",
@@ -95,7 +95,7 @@ $body2 = @{
 Invoke-RestMethod -Uri "..." -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body2
 ```
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -F "file=@D:\test\Values Description PDF.pdf" \
   -F "name=Values Description PDF.pdf" \
   -F "mode=Add"
@@ -107,7 +107,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 For PDF (programmatic use - requires base64 encoding):
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "pdf",
@@ -119,7 +119,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 
 For text content:
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "text",
@@ -138,7 +138,7 @@ $body = @{
     mode = "Add"
 } | ConvertTo-Json -Compress
 
-Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+Invoke-RestMethod -Uri "https://rag-document-assistant-2.vercel.app/api/upload" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 ```
 
 ---
@@ -146,14 +146,14 @@ Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/uplo
 ## 4. Query Document
 
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/query" \
   -H "Content-Type: application/json" \
   -d '{"query": "Your question here"}'
 ```
 
 **With mode (conversational or precise):**
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/query" \
   -H "Content-Type: application/json" \
   -d '{"query": "Your question", "mode": "conversational"}'
 ```
@@ -165,7 +165,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
 
 **With filters:**
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/query" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/query" \
   -H "Content-Type: application/json" \
   -d '{
     "query": "Your question",
@@ -185,7 +185,7 @@ $body = @{
     mode = "conversational"
 } | ConvertTo-Json -Compress
 
-Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+Invoke-RestMethod -Uri "https://rag-document-assistant-2.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 
 # Precise
 $body = @{
@@ -193,7 +193,7 @@ $body = @{
     mode = "precise"
 } | ConvertTo-Json -Compress
 
-Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
+Invoke-RestMethod -Uri "https://rag-document-assistant-2.vercel.app/api/query" -Method POST -Headers @{"Content-Type" = "application/json"} -Body $body
 ```
 
 **Response includes:**
@@ -215,7 +215,7 @@ Invoke-RestMethod -Uri "https://rag-document-assistant-three.vercel.app/api/quer
 ## 5. List Documents
 
 ```bash
-curl -X GET "https://rag-document-assistant-three.vercel.app/api/documents"
+curl -X GET "https://rag-document-assistant-2.vercel.app/api/documents"
 ```
 
 ---
@@ -223,14 +223,14 @@ curl -X GET "https://rag-document-assistant-three.vercel.app/api/documents"
 ## 6. Delete Document (by filename)
 
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -F "name=filename.pdf" \
   -F "mode=Delete"
 ```
 
 Example:
 ```bash
-curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
+curl -X POST "https://rag-document-assistant-2.vercel.app/api/upload" \
   -F "name=Values Description PDF.pdf" \
   -F "mode=Delete"
 ```
@@ -242,7 +242,7 @@ curl -X POST "https://rag-document-assistant-three.vercel.app/api/upload" \
 ## 7. Reset Index (delete ALL Pinecone records)
 
 ```bash
-curl -X DELETE "https://rag-document-assistant-three.vercel.app/api/index/reset"
+curl -X DELETE "https://rag-document-assistant-2.vercel.app/api/index/reset"
 ```
 
 **Response:** `{"status":"Index reset complete"}`

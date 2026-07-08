@@ -1,6 +1,6 @@
 # Second Brain (RAG Document Assistant) - Usage Guide
 
-**Base URL:** `https://rag-document-assistant-three.vercel.app`
+**Base URL:** `https://rag-document-assistant-2.vercel.app`
 
 A RAG system for storing, querying, and retrieving project knowledge.
 
@@ -28,7 +28,7 @@ $queryBody = @{
     mode = "conversational"  # or "precise"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/query' -Method POST -ContentType 'application/json' -Body $queryBody
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/query' -Method POST -ContentType 'application/json' -Body $queryBody
 ```
 
 | Mode | topK | When to Use |
@@ -73,7 +73,7 @@ $body = @{
     }
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body
 ```
 
 **Script location:** `D:\test\ingest-feature.ps1`
@@ -91,7 +91,7 @@ $body = @{
     mode = "Add"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
 ```
 
 ### Replace - Update existing document (same filename)
@@ -103,7 +103,7 @@ $body = @{
     mode = "Replace"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
 ```
 **Important:** Replace with SAME filename to update. Old chunks auto-deleted.
 
@@ -114,7 +114,7 @@ $body = @{
     mode = "Delete"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
 ```
 **Response:** `{"status":"Deleted"}`
 
@@ -125,7 +125,7 @@ Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/uplo
 ## 4. List Documents
 
 ```powershell
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/documents' -Method GET
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/documents' -Method GET
 ```
 
 ---
@@ -133,7 +133,7 @@ Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/docu
 ## 5. Reset Index (DANGER - deletes ALL)
 
 ```powershell
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/index/reset' -Method DELETE
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/index/reset' -Method DELETE
 ```
 **Response:** `{"status":"Index reset complete"}`
 
@@ -258,7 +258,7 @@ $body = @{
     }
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body
 ```
 
 ---
@@ -275,7 +275,7 @@ $body = @{
     mode = "Replace"
 } | ConvertTo-Json
 
-Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body
 ```
 
 ---
@@ -287,16 +287,16 @@ Use one-liners instead of saving PS1 files:
 
 ```powershell
 # Query
-powershell -Command "$body = @{query = 'your query'; mode = 'conversational'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/query' -Method POST -ContentType 'application/json' -Body $body"
+powershell -Command "$body = @{query = 'your query'; mode = 'conversational'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/query' -Method POST -ContentType 'application/json' -Body $body"
 
 # Ingest
-powershell -Command "$body = @{content = 'content'; filename = 'file.md'; metadata = @{doc_type='test'; project='x'; version='1.0'}} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body"
+powershell -Command "$body = @{content = 'content'; filename = 'file.md'; metadata = @{doc_type='test'; project='x'; version='1.0'}} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/ingest' -Method POST -ContentType 'application/json' -Body $body"
 
 # Replace
-powershell -Command "$body = @{type='text'; content='updated'; name='file.md'; mode='Replace'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body"
+powershell -Command "$body = @{type='text'; content='updated'; name='file.md'; mode='Replace'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body"
 
 # Delete
-powershell -Command "$body = @{name='file.md'; mode='Delete'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-three.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body"
+powershell -Command "$body = @{name='file.md'; mode='Delete'} | ConvertTo-Json; Invoke-RestMethod -Uri 'https://rag-document-assistant-2.vercel.app/api/upload' -Method POST -ContentType 'application/json' -Body $body"
 ```
 
 ### Option 2: Single Test Script
