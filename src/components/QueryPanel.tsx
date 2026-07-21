@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { LivePipelineLog, type LiveEvent } from './LivePipelineLog';
-import { LANGUAGES } from '@/lib/translation-pipeline';
+import { LANGUAGES } from '@/lib/languages';
 
 interface ChatMessage {
   id: string;

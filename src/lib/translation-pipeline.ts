@@ -630,38 +630,13 @@ function finalize(
 
 // ─── Language Registry (ported from ax-translator) ───────────────────────────
 // 26 languages including Hindi, Spanish, French, Japanese, Chinese, Arabic, etc.
+//
+// The canonical list lives in @/lib/languages (client-safe). This file
+// re-exports it for server callers so they can keep importing from one place.
 
-export const LANGUAGES = [
-  { value: 'en', label: 'English' },
-  { value: 'hi', label: 'Hindi' },
-  { value: 'es', label: 'Spanish' },
-  { value: 'fr', label: 'French' },
-  { value: 'de', label: 'German' },
-  { value: 'ja', label: 'Japanese' },
-  { value: 'ko', label: 'Korean' },
-  { value: 'zh', label: 'Chinese (Simplified)' },
-  { value: 'zh-TW', label: 'Chinese (Traditional)' },
-  { value: 'ar', label: 'Arabic' },
-  { value: 'pt', label: 'Portuguese' },
-  { value: 'ru', label: 'Russian' },
-  { value: 'it', label: 'Italian' },
-  { value: 'nl', label: 'Dutch' },
-  { value: 'sv', label: 'Swedish' },
-  { value: 'pl', label: 'Polish' },
-  { value: 'tr', label: 'Turkish' },
-  { value: 'th', label: 'Thai' },
-  { value: 'vi', label: 'Vietnamese' },
-  { value: 'ta', label: 'Tamil' },
-  { value: 'te', label: 'Telugu' },
-  { value: 'bn', label: 'Bengali' },
-  { value: 'mr', label: 'Marathi' },
-  { value: 'gu', label: 'Gujarati' },
-  { value: 'pa', label: 'Punjabi' },
-] as const;
-
-export function languageLabel(code: string): string {
-  return LANGUAGES.find((l) => l.value === code)?.label ?? code;
-}
+export { LANGUAGES, languageLabel } from './languages';
+export type { LanguageCode } from './languages';
+import { LANGUAGES, languageLabel } from './languages';
 
 // ─── Large-Input Handling (ported from ax-translator) ────────────────────────
 // ax-translator's page.tsx detects text >4000 tokens ("isLargeInput") and
