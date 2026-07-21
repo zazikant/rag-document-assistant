@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useMemo } from 'react';
+import QueryPanel from '@/components/QueryPanel';
 
 interface Document {
   filename: string;
@@ -10,17 +11,9 @@ interface Document {
   updated_at: string;
 }
 
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  sources?: string[];
-}
-
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'upload' | 'query' | 'docs'>('upload');
   const [documents, setDocuments] = useState<Document[]>([]);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [queryInput, setQueryInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   // Upload form state
@@ -30,7 +23,6 @@ export default function Home() {
   const [textContent, setTextContent] = useState('');
   const [uploadStatus, setUploadStatus] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Documents tab state
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
@@ -64,10 +56,6 @@ export default function Home() {
   useEffect(() => {
     fetchDocuments();
   }, []);
-
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
 
   // Clear selection when switching tabs or documents change
   useEffect(() => {
@@ -217,49 +205,6 @@ export default function Home() {
       }
     } catch (err: any) {
       setUploadStatus(`Error: ${err.message}`);
-    }
-
-    setIsLoading(false);
-  };
-
-  // Handle query
-  const handleQuery = async () => {
-    if (!queryInput.trim()) return;
-
-    const userMessage: ChatMessage = { role: 'user', content: queryInput };
-    setChatMessages((prev) => [...prev, userMessage]);
-    setQueryInput('');
-    setIsLoading(true);
-
-    try {
-      const res = await fetch('/api/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: queryInput }),
-      });
-
-      const data = await res.json();
-
-      if (data.status === 'Error') {
-        const assistantMessage: ChatMessage = {
-          role: 'assistant',
-          content: `Error: ${data.error}`,
-        };
-        setChatMessages((prev) => [...prev, assistantMessage]);
-      } else {
-        const assistantMessage: ChatMessage = {
-          role: 'assistant',
-          content: data.answer,
-          sources: data.sources,
-        };
-        setChatMessages((prev) => [...prev, assistantMessage]);
-      }
-    } catch (err: any) {
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: `Error: ${err.message}`,
-      };
-      setChatMessages((prev) => [...prev, assistantMessage]);
     }
 
     setIsLoading(false);
@@ -478,84 +423,17 @@ export default function Home() {
           </div>
         )}
 
-        {/* Query Tab */}
+        {/* Query Tab — streaming RAG chat with optional target-language translation.
+            QueryPanel consumes /api/query-stream (SSE) and renders:
+              - live pipeline log (translate-stage events included)
+              - live-answer token streaming
+              - optional live-translated-answer token streaming when a
+                target language is selected
+            The streaming + translation logic is implemented in
+            src/lib/translation-pipeline.ts (ported from ax-translator). */}
         {activeTab === 'query' && (
-          <div className="bg-[var(--card-bg)] border border-[var(--card-border)] rounded-xl flex flex-col h-[calc(100vh-200px)]">
-            {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {chatMessages.length === 0 && (
-                <div className="text-center text-[var(--muted)] mt-20">
-                  <p className="text-4xl mb-4">?</p>
-                  <p className="text-lg font-medium">Ask a question about your documents</p>
-                  <p className="text-sm mt-2">
-                    Upload some documents first, then query them using AI-powered RAG
-                  </p>
-                </div>
-              )}
-              {chatMessages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[80%] rounded-xl p-4 ${
-                      msg.role === 'user'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-[var(--card-border)] text-white'
-                    }`}
-                  >
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div className="mt-2 pt-2 border-t border-white/20">
-                        <p className="text-xs opacity-70">Sources:</p>
-                        {msg.sources.map((src, j) => (
-                          <span
-                            key={j}
-                            className="inline-block text-xs bg-white/10 rounded px-2 py-0.5 mr-1 mt-1"
-                          >
-                            {src}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {isLoading && (
-                <div className="flex justify-start">
-                  <div className="bg-[var(--card-border)] rounded-xl p-4 text-[var(--muted)]">
-                    <div className="flex gap-1">
-                      <span className="w-2 h-2 bg-[var(--muted)] rounded-full animate-bounce" />
-                      <span className="w-2 h-2 bg-[var(--muted)] rounded-full animate-bounce [animation-delay:0.1s]" />
-                      <span className="w-2 h-2 bg-[var(--muted)] rounded-full animate-bounce [animation-delay:0.2s]" />
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Query Input */}
-            <div className="border-t border-[var(--card-border)] p-4">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={queryInput}
-                  onChange={(e) => setQueryInput(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleQuery()}
-                  placeholder="Ask about your documents..."
-                  className="flex-1 bg-[var(--background)] border border-[var(--card-border)] rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500"
-                  disabled={isLoading}
-                />
-                <button
-                  onClick={handleQuery}
-                  disabled={isLoading || !queryInput.trim()}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-6 py-3 rounded-lg text-sm font-medium transition-colors"
-                >
-                  Send
-                </button>
-              </div>
-            </div>
+          <div className="bg-[var(--card-bg)] border border-[var(--card-border)] rounded-xl flex flex-col h-[calc(100vh-200px)] overflow-hidden">
+            <QueryPanel documentsCount={documents.length} />
           </div>
         )}
 

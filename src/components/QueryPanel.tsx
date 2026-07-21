@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { LivePipelineLog, type LiveEvent } from './LivePipelineLog';
+import { LANGUAGES } from '@/lib/translation-pipeline';
 
 interface ChatMessage {
   id: string;
@@ -10,6 +11,9 @@ interface ChatMessage {
   sources?: string[];
   error?: boolean;
   streaming?: boolean;
+  translatedContent?: string;
+  translatedStreaming?: boolean;
+  targetLanguage?: string;
 }
 
 interface QueryPanelProps {
@@ -22,28 +26,41 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
   const [loading, setLoading] = useState(false);
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [liveText, setLiveText] = useState('');
+  const [liveTranslatedText, setLiveTranslatedText] = useState('');
   const [showLiveLog, setShowLiveLog] = useState(true);
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  // Target language for optional answer translation. Empty string = no translation.
+  const [targetLanguage, setTargetLanguage] = useState<string>('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const liveTextRef = useRef('');
+  const liveTranslatedTextRef = useRef('');
 
   useEffect(() => {
     liveTextRef.current = liveText;
   }, [liveText]);
 
+  useEffect(() => {
+    liveTranslatedTextRef.current = liveTranslatedText;
+  }, [liveTranslatedText]);
+
   // Update the streaming message as live text arrives
   useEffect(() => {
-    if (streamingMessageId && liveText) {
+    if (streamingMessageId && (liveText || liveTranslatedText)) {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === streamingMessageId && m.streaming
-            ? { ...m, content: liveText }
+            ? {
+                ...m,
+                content: liveText,
+                translatedContent: liveTranslatedText || undefined,
+                translatedStreaming: !!liveTranslatedText,
+              }
             : m,
         ),
       );
     }
-  }, [liveText, streamingMessageId]);
+  }, [liveText, liveTranslatedText, streamingMessageId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -51,21 +68,34 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, liveText]);
+  }, [messages, liveText, liveTranslatedText]);
 
   /**
    * Streaming query — calls /api/query-stream (SSE) and consumes events.
-   * Each event updates liveEvents + (for chunks) liveText in real time.
-   * Returns the final answer + sources, or throws on failure.
+   * Each event updates liveEvents + (for chunks) liveText / liveTranslatedText.
+   *
+   * Chunk events now carry an optional `stage` field:
+   *   - 'answer'    → streams into liveText (the RAG answer)
+   *   - 'translate' → streams into liveTranslatedText (translated answer)
+   *   - missing     → treated as 'answer' for backward compat
+   *
+   * Returns the final answer + sources (+ translated answer if produced),
+   * or throws on failure.
    */
   const streamQuery = useCallback(async (
     userQuery: string,
     mode: 'conversational' | 'precise' = 'conversational',
-  ): Promise<{ answer: string; sources: string[] }> => {
+    tgtLang: string = '',
+  ): Promise<{ answer: string; sources: string[]; translatedAnswer?: string; targetLanguage?: string }> => {
+    const requestBody: Record<string, unknown> = { query: userQuery, mode };
+    if (tgtLang) {
+      requestBody.targetLanguage = tgtLang;
+    }
+
     const response = await fetch('/api/query-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: userQuery, mode }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok || !response.body) {
@@ -78,6 +108,8 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
     let buffer = '';
     let finalAnswer = '';
     let finalSources: string[] = [];
+    let finalTranslatedAnswer: string | undefined;
+    let finalTargetLanguage: string | undefined;
     let errorMessage: string | null = null;
 
     while (true) {
@@ -99,10 +131,21 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
             setLiveEvents((prev) => [...prev, { ts: evTs, ...ev }]);
 
             if (ev.type === 'chunk' && typeof ev.text === 'string') {
-              setLiveText((prev) => prev + ev.text);
+              const stage = typeof ev.stage === 'string' ? ev.stage : 'answer';
+              if (stage === 'translate') {
+                // First translate chunk — clear the placeholder buffer.
+                setLiveTranslatedText((prev) => (prev === '' ? ev.text : prev + ev.text));
+              } else {
+                setLiveText((prev) => prev + ev.text);
+              }
+            } else if (ev.type === 'stage-start' && ev.stage === 'translate') {
+              // Translate stage starting — reset the translate buffer.
+              setLiveTranslatedText('');
             } else if (ev.type === 'pipeline-end' && ev.result) {
               if (ev.result.answer) finalAnswer = ev.result.answer;
               if (ev.result.sources) finalSources = ev.result.sources;
+              if (ev.result.translatedAnswer) finalTranslatedAnswer = ev.result.translatedAnswer;
+              if (ev.result.targetLanguage) finalTargetLanguage = ev.result.targetLanguage;
               if (ev.result.error) errorMessage = ev.result.error;
             } else if (ev.type === 'error' && ev.message) {
               errorMessage = ev.message;
@@ -120,7 +163,15 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
     if (!finalAnswer) {
       finalAnswer = liveTextRef.current || 'No answer generated.';
     }
-    return { answer: finalAnswer, sources: finalSources };
+    if (!finalTranslatedAnswer && liveTranslatedTextRef.current) {
+      finalTranslatedAnswer = liveTranslatedTextRef.current;
+    }
+    return {
+      answer: finalAnswer,
+      sources: finalSources,
+      translatedAnswer: finalTranslatedAnswer,
+      targetLanguage: finalTargetLanguage,
+    };
   }, []);
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -139,20 +190,25 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
     setLoading(true);
     setLiveEvents([]);
     setLiveText('');
+    setLiveTranslatedText('');
 
     // Create a placeholder assistant message that we'll update as tokens stream
     const assistantId = crypto.randomUUID();
     setStreamingMessageId(assistantId);
-    setMessages((prev) => [...prev, {
+    const initialMessage: ChatMessage = {
       id: assistantId,
       role: 'assistant',
       content: '',
       streaming: true,
-    }]);
+    };
+    if (targetLanguage) {
+      initialMessage.targetLanguage = targetLanguage;
+    }
+    setMessages((prev) => [...prev, initialMessage]);
 
     try {
       const MAX_ATTEMPTS = 3;
-      let result: { answer: string; sources: string[] } | null = null;
+      let result: { answer: string; sources: string[]; translatedAnswer?: string; targetLanguage?: string } | null = null;
       let lastError = '';
 
       for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -163,10 +219,11 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
             line: `[pipeline] Query attempt ${attempt}/${MAX_ATTEMPTS} — retrying…`,
           }]);
           setLiveText('');
+          setLiveTranslatedText('');
         }
 
         try {
-          result = await streamQuery(trimmed, 'conversational');
+          result = await streamQuery(trimmed, 'conversational', targetLanguage);
           break;
         } catch (streamErr: unknown) {
           const msg = streamErr instanceof Error ? streamErr.message : String(streamErr);
@@ -193,7 +250,15 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: result!.answer, sources: result!.sources || [], streaming: false }
+              ? {
+                  ...m,
+                  content: result!.answer,
+                  sources: result!.sources || [],
+                  streaming: false,
+                  translatedStreaming: false,
+                  translatedContent: result!.translatedAnswer,
+                  targetLanguage: result!.targetLanguage,
+                }
               : m,
           ),
         );
@@ -263,6 +328,38 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
               ? `${documentsCount} document${documentsCount !== 1 ? 's' : ''} indexed`
               : 'No documents indexed'}
           </p>
+        </div>
+        {/* Target-language picker — when set, each answer is stream-translated
+            by the translate stage in /api/query-stream. Empty = no translation. */}
+        <div className="ml-auto flex items-center gap-2">
+          <label
+            htmlFor="targetLanguage"
+            className="text-xs"
+            style={{ color: 'var(--muted)' }}
+            title="Auto-translate every streamed answer into this language"
+          >
+            Translate to
+          </label>
+          <select
+            id="targetLanguage"
+            value={targetLanguage}
+            onChange={(e) => setTargetLanguage(e.target.value)}
+            disabled={loading}
+            className="text-xs rounded-md px-2 py-1 outline-none transition-all"
+            style={{
+              background: 'rgba(255,255,255,0.05)',
+              border: '1px solid var(--card-border)',
+              color: targetLanguage ? 'rgb(216,180,254)' : 'var(--muted)',
+              cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            <option value="">Off</option>
+            {LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -364,6 +461,37 @@ export default function QueryPanel({ documentsCount }: QueryPanelProps) {
                           {source}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {/* Translated answer block — appears when a target language
+                      is selected. Streams in token-by-token as the translate
+                      stage's `chunk` events arrive, exactly mirroring the
+                      live-answer streaming pattern. */}
+                  {(msg.translatedContent !== undefined || msg.translatedStreaming) && msg.targetLanguage && (
+                    <div
+                      className="mt-2.5 rounded-lg px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap"
+                      style={{
+                        background: 'rgba(168,85,247,0.08)',
+                        border: '1px solid rgba(168,85,247,0.25)',
+                        color: 'var(--foreground)',
+                      }}
+                    >
+                      <div
+                        className="flex items-center gap-1.5 mb-1 text-[11px] font-medium"
+                        style={{ color: 'rgb(168,85,247)' }}
+                      >
+                        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21L3 24l1.5-4.5L9 12m9 0l-3 3m3-3l-3-3m3 3l-3 9c0 1.657-1.343 3-3 3h-1.5m-6 0h-1.5c-1.657 0-3-1.343-3-3V9c0-1.657 1.343-3 3-3h1.5m6 0h1.5c1.657 0 3 1.343 3 3v6" />
+                        </svg>
+                        Translation · {msg.targetLanguage.toUpperCase()}
+                      </div>
+                      {msg.translatedContent || ''}
+                      {msg.translatedStreaming && (
+                        <span
+                          className="inline-block w-1.5 h-3.5 ml-0.5 align-text-bottom animate-pulse"
+                          style={{ background: 'rgb(168,85,247)' }}
+                        />
+                      )}
                     </div>
                   )}
                   {msg.role === 'user' && (

@@ -1,6 +1,16 @@
 import { NextRequest } from 'next/server';
 import { searchRecords, rerankAndAggregate, buildContextFromAggregated } from '@/lib/pinecone-edge';
 import { nvidiaChatStreamControlled } from '@/lib/nvidia';
+import {
+  calculateMaxTokens,
+  isEcho,
+  languageLabel,
+  isLargeInput,
+  splitIntoChunks,
+  CHUNK_TARGET_TOKENS,
+  MAX_CHUNK_ATTEMPTS,
+  adaptiveCooldownSec,
+} from '@/lib/translation-pipeline';
 
 // Note: We use pinecone-edge (direct REST API) instead of pinecone (SDK)
 // because the Pinecone SDK pulls in node:stream which is unsupported in
@@ -11,10 +21,22 @@ import { nvidiaChatStreamControlled } from '@/lib/nvidia';
  * Streaming RAG query endpoint (Server-Sent Events) — DSPy-style.
  *
  * POST /api/query-stream
- *   { query, top_k?, filters?, mode? }
+ *   { query, top_k?, filters?, mode?, targetLanguage? }
+ *
+ *   targetLanguage (optional): ISO code (e.g. 'es', 'hi'). When set,
+ *   after the RAG answer is generated, an additional `translate` stage
+ *   stream-translates the answer into the requested language using the
+ *   DSPy-style translation pipeline (ax-translator pattern).
  *
  * Response: text/event-stream with structured events:
  *   stage-start / log / chunk / stage-end / pipeline-end / error
+ *
+ *   `chunk` events carry an optional `stage` field:
+ *     - stage === 'answer'    → tokens of the RAG answer (default)
+ *     - stage === 'translate' → tokens of the translated answer
+ *   Clients that only render `liveText` should reset their buffer when
+ *   `stage-start: translate` arrives, then append `stage=translate`
+ *   chunks to a separate "translated answer" buffer.
  *
  * DSPy-style pipeline (ax-translator pattern):
  *   1. Search Pinecone
@@ -24,6 +46,13 @@ import { nvidiaChatStreamControlled } from '@/lib/nvidia';
  *      — only if multi-chunk aggregation
  *   5. Answer (Signature: "context, question -> intelligent_answer")
  *      — streams tokens live, up to 30K chars
+ *   6. Translate (Signature: "answer, target_language -> translated_answer")
+ *      — only when targetLanguage is set
+ *      — small answer (≤4000 tokens): single streaming translate call
+ *      — large answer (>4000 tokens): chunked at paragraph/sentence
+ *        boundaries into ~3K-token chunks, each translated with up to 3
+ *        attempts and an adaptive inter-chunk cooldown (ax-translator's
+ *        isLargeInput + splitIntoChunks logic, ported server-side)
  *
  * Each LLM call uses the ax-translator controlled-call pattern:
  *   - 28s per-call timeout (proven reliable for gpt-oss-120b on Vercel Edge)
@@ -47,6 +76,7 @@ interface QueryRequest {
     project?: string;
   };
   mode?: 'conversational' | 'precise';
+  targetLanguage?: string; // ISO code (e.g. 'es'). When set, run a translate stage after answer.
 }
 
 // ─── DSPy-style Signature Prompts (ax-translator pattern) ─────
@@ -97,6 +127,7 @@ Be thorough — this synthesis will be used as context for the final answer, so 
 
 interface SSEEvent {
   type: string;
+  stage?: string;
   [k: string]: unknown;
 }
 
@@ -104,15 +135,127 @@ function sse(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
+// ─── Translation system prompt (fast-mode, ax-translator pattern) ───────────
+// Single streaming call. Token budget sized via calculateMaxTokens() so the
+// translated answer can match (or modestly exceed) the original length.
+
+function buildTranslateSystemPrompt(targetLabel: string, isRetry: boolean): string {
+  if (isRetry) {
+    return `You are a professional translator. Your task is to TRANSLATE the given text into ${targetLabel}.
+
+CRITICAL INSTRUCTION: You MUST output the text IN ${targetLabel.toUpperCase()}. Do NOT output the same text in the original language. This is a translation task, not a repetition task. The previous attempt returned the original text unchanged — you must actually translate it this time.
+
+Rules:
+- Produce a clean, natural, and understandable translation in ${targetLabel}
+- Preserve the original meaning exactly — do not add, remove, or change information
+- Use natural phrasing that a native speaker of ${targetLabel} would use
+- Output ONLY the translated text in ${targetLabel}, nothing else.`;
+  }
+  return `You are a professional translator. Translate the given text into ${targetLabel}.
+
+Rules:
+- Produce a clean, natural, and understandable translation
+- Preserve the original meaning exactly — do not add, remove, or change information
+- Use natural phrasing that a native speaker would use
+- Maintain the same tone and register (formal, informal, technical, etc.)
+- If the text contains idioms, translate them to equivalent expressions in the target language
+- If the text contains technical terms, use the standard terminology in the target language
+- Output ONLY the translated text in ${targetLabel}, nothing else
+- Do NOT output the original text — you must output the translation`;
+}
+
+/**
+ * Translate a single chunk of text via the controlled streaming client.
+ * Used by both the single-call path and the chunked path below.
+ *
+ * Streams tokens via `stage: 'translate'` chunks. Echo detection: if the
+ * model returns the source unchanged, retries once with a forceful prompt.
+ * Returns the cleaned translation + the elapsed time from the (final)
+ * successful call. Throws if the underlying call fails.
+ */
+async function translateChunk(
+  sourceText: string,
+  targetLabel: string,
+  onLog: (line: string) => void,
+  onChunk: (text: string) => void,
+): Promise<{ translated: string; elapsedMs: number }> {
+  const maxTokens = calculateMaxTokens(sourceText);
+  let raw = '';
+
+  const result = await nvidiaChatStreamControlled({
+    messages: [
+      { role: 'system', content: buildTranslateSystemPrompt(targetLabel, false) },
+      { role: 'user', content: `Translate the following text into ${targetLabel}. The output must be in ${targetLabel}:\n\n${sourceText}` },
+    ],
+    temperature: 0.3,
+    maxTokens,
+    onLog,
+    onChunk: (text) => {
+      raw += text;
+      onChunk(text);
+    },
+  });
+
+  let cleaned = raw
+    .replace(/^```[\w]*\n?/m, '')
+    .replace(/\n?```$/m, '')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+
+  // Echo detection — retry once with forceful prompt
+  if (isEcho(sourceText, cleaned)) {
+    onLog(`[pipeline] Echo detected in translate stage — retrying with forceful prompt…`);
+    raw = '';
+    await nvidiaChatStreamControlled({
+      messages: [
+        { role: 'system', content: buildTranslateSystemPrompt(targetLabel, true) },
+        { role: 'user', content: `Translate the following text into ${targetLabel}. The output must be in ${targetLabel}:\n\n${sourceText}` },
+      ],
+      temperature: 0.3,
+      maxTokens,
+      onLog,
+      onChunk: (text) => {
+        raw += text;
+        onChunk(text);
+      },
+    });
+    cleaned = raw
+      .replace(/^```[\w]*\n?/m, '')
+      .replace(/\n?```$/m, '')
+      .replace(/^["']|["']$/g, '')
+      .trim();
+  }
+
+  return { translated: cleaned, elapsedMs: result.elapsedMs };
+}
+
 export async function POST(request: NextRequest) {
   const body: QueryRequest = await request.json();
-  const { query, filters, mode = 'conversational' } = body;
+  const { query, filters, mode = 'conversational', targetLanguage } = body;
 
   if (!query || query.trim().length === 0) {
     return new Response(
       JSON.stringify({ error: 'Query is required' }),
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
+  }
+
+  // Validate targetLanguage if provided — must be a known ISO code.
+  // We don't strictly enforce against LANGUAGES, but we reject empty /
+  // suspiciously long values to avoid prompt injection.
+  if (targetLanguage !== undefined) {
+    if (typeof targetLanguage !== 'string' || targetLanguage.trim().length === 0) {
+      return new Response(
+        JSON.stringify({ error: 'targetLanguage must be a non-empty ISO code string' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (targetLanguage.length > 16) {
+      return new Response(
+        JSON.stringify({ error: 'targetLanguage must be a short ISO code (≤16 chars)' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
   }
 
   const effectiveTopK = mode === 'precise' ? 5 : 12;
@@ -283,10 +426,14 @@ export async function POST(request: NextRequest) {
         // max_tokens=32768 supports up to ~30K char outputs for complex
         // technical questions. The SYSTEM_PROMPT tells the model to be
         // adaptive — short for simple lookups, long for complex reasoning.
+        // Each chunk is tagged `stage: 'answer'` so clients routing
+        // translate-stage chunks to a separate buffer can distinguish them.
         emit({ type: 'stage-start', stage: 'answer' });
         emit({ type: 'log', line: `[pipeline] Generating final answer (streaming tokens live, up to 30K chars)…` });
 
         let answer = '';
+        let answerElapsedMs = 0;
+        let answerErrorMsg = '';
         try {
           const answerResult = await nvidiaChatStreamControlled({
             messages: [
@@ -298,44 +445,34 @@ export async function POST(request: NextRequest) {
             onLog: (line) => emit({ type: 'log', line }),
             onChunk: (text) => {
               answer += text;
-              emit({ type: 'chunk', text });
+              emit({ type: 'chunk', text, stage: 'answer' });
             },
           });
+          answerElapsedMs = answerResult.elapsedMs;
 
           emit({
             type: 'stage-end',
             stage: 'answer',
             ok: true,
-            elapsedMs: answerResult.elapsedMs,
+            elapsedMs: answerElapsedMs,
             summary: `${answer.length} chars answer`,
           });
-
-          const result = {
-            answer: answer || 'No answer generated.',
-            sources,
-            aggregatedContext: reducedContext !== context ? reducedContext : null,
-            debug: {
-              hitsFound: validHits.length,
-              documentsAggregated: aggregated.length,
-              reducerUsed: reducerNeeded,
-            },
-          };
-          emit({ type: 'pipeline-end', result });
         } catch (answerError: any) {
+          answerErrorMsg = answerError?.message ?? String(answerError);
           emit({
             type: 'stage-end',
             stage: 'answer',
             ok: false,
             elapsedMs: 0,
-            summary: `Answer failed: ${answerError.message?.slice(0, 150)}`,
+            summary: `Answer failed: ${answerErrorMsg.slice(0, 150)}`,
           });
-          emit({ type: 'error', message: answerError.message });
+          emit({ type: 'error', message: answerErrorMsg });
           emit({
             type: 'pipeline-end',
             result: {
               answer: '',
               sources,
-              error: answerError.message,
+              error: answerErrorMsg,
               debug: {
                 hitsFound: validHits.length,
                 documentsAggregated: aggregated.length,
@@ -343,7 +480,189 @@ export async function POST(request: NextRequest) {
               },
             },
           });
+          // Skip translate stage if answer failed
+          return;
         }
+
+        // ─── STEP 6 (OPTIONAL): TRANSLATE ANSWER ─────────────────────
+        // Signature: "answer, target_language -> translated_answer"
+        // Runs only when `targetLanguage` was provided.
+        //
+        // Two paths (ax-translator's isLargeInput branch, ported server-side):
+        //   - Small answer (≤4000 tokens): single streaming translate call
+        //     with echo-retry. Fast mode (no validate/refine) to stay
+        //     within Vercel Edge's 30s cap.
+        //   - Large answer (>4000 tokens): split at paragraph/sentence
+        //     boundaries into ~3K-token chunks; translate each chunk
+        //     sequentially with up to 3 attempts and an adaptive
+        //     inter-chunk cooldown (10s/30s/60s based on prior chunk).
+        //
+        // All translate-stage chunks are tagged `stage: 'translate'` so
+        // the client routes them to a separate "translated answer" buffer.
+        let translatedAnswer: string | undefined;
+        let translateOk = false;
+
+        if (targetLanguage) {
+          const targetLabel = languageLabel(targetLanguage);
+          emit({ type: 'stage-start', stage: 'translate' });
+
+          const useChunkedTranslate = isLargeInput(answer);
+          if (useChunkedTranslate) {
+            emit({
+              type: 'log',
+              line: `[pipeline] Large answer detected — chunked translation into ${targetLabel} (${targetLanguage})…`,
+            });
+
+            // Chunk the answer at paragraph/sentence boundaries.
+            const chunks = splitIntoChunks(answer, CHUNK_TARGET_TOKENS);
+            emit({
+              type: 'log',
+              line: `[pipeline] Split answer into ${chunks.length} chunks × ~${CHUNK_TARGET_TOKENS} tokens each.`,
+            });
+            if (chunks.length >= 3) {
+              emit({
+                type: 'log',
+                line: `[pipeline] ⚠️ ${chunks.length} chunks with inter-chunk cooldowns may exceed Vercel's 30s function cap.`,
+              });
+            }
+
+            const translatedChunks: string[] = [];
+            let succeededChunks = 0;
+            let lastChunkError = '';
+
+            for (let i = 0; i < chunks.length; i++) {
+              emit({
+                type: 'log',
+                line: `[pipeline] Translate chunk ${i + 1}/${chunks.length} starting…`,
+              });
+
+              let chunkOk = false;
+              let chunkTranslated = '';
+
+              for (let chunkAttempt = 1; chunkAttempt <= MAX_CHUNK_ATTEMPTS; chunkAttempt++) {
+                if (chunkAttempt > 1) {
+                  emit({
+                    type: 'log',
+                    line: `[pipeline] Translate chunk ${i + 1}/${chunks.length} attempt ${chunkAttempt}/${MAX_CHUNK_ATTEMPTS} — retrying…`,
+                  });
+                }
+                try {
+                  const r = await translateChunk(
+                    chunks[i],
+                    targetLabel,
+                    (line) => emit({ type: 'log', line }),
+                    (text) => emit({ type: 'chunk', text, stage: 'translate' }),
+                  );
+                  chunkTranslated = r.translated;
+                  if (!chunkTranslated.trim()) {
+                    throw new Error('Empty translation result.');
+                  }
+                  chunkOk = true;
+                  lastChunkError = '';
+                  break;
+                } catch (chunkErr: any) {
+                  lastChunkError = chunkErr?.message ?? String(chunkErr);
+                  emit({
+                    type: 'log',
+                    line: `[pipeline] Translate chunk ${i + 1}/${chunks.length} attempt ${chunkAttempt}/${MAX_CHUNK_ATTEMPTS} FAILED: ${lastChunkError.slice(0, 150)}`,
+                  });
+                  if (chunkAttempt === MAX_CHUNK_ATTEMPTS) {
+                    emit({
+                      type: 'log',
+                      line: `[pipeline] Translate chunk ${i + 1}/${chunks.length} failed ${MAX_CHUNK_ATTEMPTS}× — using placeholder.`,
+                    });
+                  }
+                }
+              }
+
+              if (chunkOk && chunkTranslated.trim()) {
+                if (chunkTranslated.trim() === chunks[i].trim()) {
+                  emit({
+                    type: 'log',
+                    line: `[pipeline] Translate chunk ${i + 1} returned same text — echo detected`,
+                  });
+                }
+                translatedChunks.push(chunkTranslated);
+                succeededChunks++;
+              } else {
+                translatedChunks.push(`[Chunk ${i + 1} failed: ${lastChunkError.slice(0, 100)}]`);
+              }
+
+              // Adaptive inter-chunk cooldown (skip after the last chunk)
+              if (i < chunks.length - 1) {
+                const attemptsUsed = chunkOk ? 1 : MAX_CHUNK_ATTEMPTS;
+                const delaySec = adaptiveCooldownSec(chunkOk, attemptsUsed, lastChunkError);
+                emit({
+                  type: 'log',
+                  line: `[pipeline] Cooldown: waiting ${delaySec}s before translate chunk ${i + 2}/${chunks.length}…`,
+                });
+                await new Promise((resolve) => setTimeout(resolve, delaySec * 1000));
+              }
+            }
+
+            translatedAnswer = translatedChunks.join('\n\n');
+            translateOk = succeededChunks > 0;
+            emit({
+              type: 'stage-end',
+              stage: 'translate',
+              ok: translateOk,
+              elapsedMs: 0,
+              summary: `${succeededChunks}/${chunks.length} chunks ok, ${translatedAnswer.length} chars total`,
+            });
+          } else {
+            // Small answer — single streaming translate call
+            emit({
+              type: 'log',
+              line: `[pipeline] Translating answer into ${targetLabel} (${targetLanguage}) — fast mode, streaming tokens live…`,
+            });
+
+            try {
+              const r = await translateChunk(
+                answer,
+                targetLabel,
+                (line) => emit({ type: 'log', line }),
+                (text) => emit({ type: 'chunk', text, stage: 'translate' }),
+              );
+              translatedAnswer = r.translated;
+              translateOk = !!translatedAnswer;
+              emit({
+                type: 'stage-end',
+                stage: 'translate',
+                ok: translateOk,
+                elapsedMs: r.elapsedMs,
+                summary: `${translatedAnswer.length} chars translated`,
+              });
+            } catch (translateError: any) {
+              const tErr = translateError?.message ?? String(translateError);
+              emit({
+                type: 'stage-end',
+                stage: 'translate',
+                ok: false,
+                elapsedMs: 0,
+                summary: `Translate failed: ${tErr.slice(0, 150)} — returning untranslated answer`,
+              });
+              emit({ type: 'log', line: `[pipeline] Translate stage error — returning answer in original language.` });
+            }
+          }
+        }
+
+        const result: Record<string, unknown> = {
+          answer: answer || 'No answer generated.',
+          sources,
+          aggregatedContext: reducedContext !== context ? reducedContext : null,
+          debug: {
+            hitsFound: validHits.length,
+            documentsAggregated: aggregated.length,
+            reducerUsed: reducerNeeded,
+            translated: translateOk,
+            targetLanguage: targetLanguage ?? null,
+          },
+        };
+        if (translatedAnswer !== undefined) {
+          result.translatedAnswer = translatedAnswer;
+          result.targetLanguage = targetLanguage;
+        }
+        emit({ type: 'pipeline-end', result });
       } catch (error: any) {
         emit({ type: 'error', message: error.message });
         emit({ type: 'pipeline-end', result: { error: error.message } });
