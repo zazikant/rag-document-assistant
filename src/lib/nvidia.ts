@@ -14,9 +14,9 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 15_000; // 15 seconds between retries (legacy)
 
 // ─── Streaming constants (ax-translator pattern) ─────────────
-// 28s per-call timeout — proven reliable for gpt-oss-120b on Vercel Edge.
+// 120s per-call timeout — proven reliable for gpt-oss-120b on Vercel Edge.
 // 1 attempt per server call — pipeline-level retry handles additional attempts.
-export const STREAM_CALL_TIMEOUT_MS = 28_000;
+export const STREAM_CALL_TIMEOUT_MS = 120_000;
 export const STREAM_MAX_ATTEMPTS = 1;
 
 /**
@@ -142,7 +142,7 @@ export interface ControlledStreamOptions {
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
   temperature?: number;
   maxTokens?: number;
-  /** Per-call timeout in ms. Default 28000. */
+  /** Per-call timeout in ms. Default 120000. */
   timeoutMs?: number;
   /** Max attempts (including the first). Default 1. */
   maxRetries?: number;
